@@ -1,0 +1,167 @@
+body {
+  display: grid;
+  grid-template-columns: 1fr, 1fr, 1fr;
+  grid-template-rows: 1vw, 1vw, 1vw, 1vw, 1vw;
+  /* grid-gap: 5px; */
+}
+p {
+  font-size: smaller;
+}
+img {
+  max-width: 100%;
+  max-height: 100%;
+  height: auto;
+}
+
+#iotd {
+  display: grid;
+  grid-column: 1 / span 2;
+  grid-row: 1 / span 3;
+}
+
+.title {
+  grid-column: 1;
+  grid-row: 1;
+  color: #212121;
+  font-size: 1.9em;
+  padding: 20px;
+  margin: auto;
+}
+/* .nasa-website {
+  grid-column: 3;
+  grid-row: 1;
+} */
+
+/* LRG Landscape:desktop */
+@media only screen and (min-width: 1200px) {
+  .response-title {
+    grid-column: 1;
+    grid-row: 2;
+    padding: 20px;
+    justify-self: center;
+  }
+  .iotd-image {
+    grid-column: 2 / span 2;
+    grid-row: 1 / span 2;
+    justify-self: center;
+    height: auto;
+    object-fit: cover;
+  }
+
+  .image-details {
+    grid-column: 1;
+    grid-row: 2;
+    justify-self: center;
+    max-width: 600px;
+  }
+
+  .explanation {
+    justify-self: center;
+    text-align: left;
+    max-width: 500px;
+
+    padding: 60px 10px 0px 20px;
+  }
+
+  .date {
+    justify-self: center;
+    text-align: left;
+    padding: 20px 0px 0px 20px;
+  }
+}
+
+/* portrait:mobile */
+@media only screen and (max-width: 1200px) {
+  .iotd {
+    display: grid;
+    grid-template-columns: 1fr, 1fr;
+    grid-template-rows: 1fr, 1fr, 1fr, 1fr, 1fr;
+  }
+
+  .title {
+    grid-column: 1 / span 2;
+    grid-row: 1;
+    font-size: 1.9em;
+  }
+
+  .response-title {
+    grid-column: 1 / span 2;
+    grid-row: 2;
+    justify-self: center;
+    padding: 20px;
+  }
+
+  .iotd-image {
+    grid-column: 1 / span 2;
+    grid-row: 3;
+    width: 100%;
+    justify-content: center;
+    margin: 0;
+  }
+
+  .image-details {
+    grid-column: 1 / span 2;
+    grid-row: 4;
+    justify-self: center;
+    max-width: 600px;
+  }
+
+  .explanation {
+    padding: 20px;
+    margin: auto;
+  }
+
+  .date {
+    text-align: left;
+    padding: 20px;
+  }
+}
+
+/* NASA nasaView.js COLLECTION PHOTOS ////////////////////*/
+.container {
+  grid-column: 1 / span 2;
+  grid-row: 5;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  padding: 50px 0px 0px 0px;
+  margin: 0;
+}
+
+.card-container {
+  height: auto;
+  width: 25%;
+  margin: auto;
+}
+
+.card-title {
+  width: 100%;
+  padding: 10px 0 0 0;
+}
+
+.card-date_created {
+  width: 100%;
+  font-size: 10px;
+  padding: 0 0 20px 0;
+}
+
+.card-image {
+  width: 100%;
+  height: 20vw;
+  object-fit: cover;
+}
+
+.card-description {
+  display: none;
+  height: auto;
+  width: 100%;
+  height: auto;
+  overflow: hidden;
+  padding: 5px;
+}
+/* portrait:mobile */
+@media only screen and (max-width: 1200px) {
+  .card-container {
+    width: 100%;
+  }
+}
