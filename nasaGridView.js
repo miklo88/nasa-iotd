@@ -1,26 +1,16 @@
 // import showCard from "./showCard.js";
 import StateObject from "/stateObject.js";
 import DisplayCard from "/showCard.js";
-const stateObject = new StateObject();
 const nasaList = new NASAPopular();
 const displayCard = new DisplayCard();
 
 class NasaView extends StateObject {
-  constructor(
-    curentState,
-    storeItemList,
-    hasState,
-    getState,
-    moveRight,
-    moveLeft
-  ) {
+  constructor() {
     super();
     this.currentState;
     this.storeItemList;
     this.hasState;
     this.getState();
-    // this.moveLeft();
-    // this.moveRight();
   }
 }
 
