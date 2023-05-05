@@ -1,10 +1,8 @@
 .new-card-container {
   display: grid;
-  /* grid-column: 1 / span 2;
-  grid-row: 1 / span 5; */
   grid-template-columns: 200px, 200px, 200px, 1fr;
   grid-template-rows: 1fr, 1fr, 1fr, 1fr, 1fr, 1fr;
-  margin: auto;
+  margin: 0 auto;
 }
 
 .new-card-title {
@@ -20,61 +18,82 @@
 /* LRG Landscape:desktop */
 @media only screen and (min-width: 1200px) {
   .new-card-image {
+    display: grid;
     grid-column: 4;
-    grid-row: 1 / span 5;
-    justify-self: center;
-    height: auto;
-    object-fit: cover;
+    grid-row: 1 / span 4;
+    width: 100%;
+    place-items: center;
+    max-width: min-content;
+    max-height: min-content;
+    margin: 0 auto;
   }
 
   .new-card-description {
     grid-column: 1 / span 3;
     grid-row: 2;
     justify-self: center;
+    align-content: center;
+    text-align: center;
+    text-justify: center;
     max-width: 600px;
+    padding: 10px 20px 5px 20px;
   }
 
   .new-card-date-created {
     grid-column: 1 / span 3;
     grid-row: 3;
     justify-self: center;
-    padding: 20px;
+    align-content: center;
+    padding: 5px 20px 10px 20px;
     max-width: 600px;
+  }
+  .button-container {
+    grid-column: 2;
+    grid-row: 4;
+    display: flex;
+    flex-direction: row;
+    justify-self: center;
+    align-content: center;
+    padding: 20px 5px, 5px, 20px;
+    margin: 0 auto;
   }
   .home-button {
     grid-column: 2;
     grid-row: 4;
-    padding: 20px;
+    padding: 40px 10px, 10px, 40px;
     border: none;
-    background-color: #eae5e4;
+    background-color: white;
     margin: auto;
   }
   .home-button:hover {
-    background-color: #ababab;
+    background-color: #eae5e4;
+    border-radius: 10%;
     transition-delay: 0.2s;
   }
   .previous-button {
     grid-column: 1;
     grid-row: 4;
-    padding: 20px;
+    padding: 40px 10px, 10px, 40px;
     border: none;
-    background-color: #eae5e4;
+    background-color: white;
     margin: auto;
   }
   .previous-button:hover {
-    background-color: #ababab;
+    background-color: #eae5e4;
+    border-radius: 10%;
     transition-delay: 0.2s;
   }
   .next-button {
     grid-column: 3;
     grid-row: 4;
-    padding: 20px;
+    padding: 40px 10px, 10px, 40px;
     border: none;
-    background-color: #eae5e4;
+    background-color: white;
     margin: auto;
   }
   .next-button:hover {
-    background-color: #ababab;
+    background-color: #eae5e4;
+    border-radius: 10%;
     transition-delay: 0.2s;
   }
 }
@@ -101,60 +120,78 @@
   }
 
   .new-card-image {
+    display: grid;
     grid-column: 1 / span 3;
     grid-row: 3;
     width: 100%;
-    margin: 0;
+    justify-self: center;
+    align-content: center;
+    max-width: min-content;
+    max-height: min-content;
+    margin: 0 auto;
   }
 
   .new-card-description {
     grid-column: 1 / span 3;
     grid-row: 4;
     justify-self: center;
-    /* max-width: 600px; */
-    padding: 20px;
+    padding: 20px 20px 5px 20px;
+    max-width: 600px;
   }
 
   .new-card-date-created {
     grid-column: 1 / span 3;
     grid-row: 5;
     justify-self: start;
-    padding: 20px;
+    padding: 5px 20px 10px 20px;
+  }
+  .button-container {
+    grid-column: 2;
+    grid-row: 6;
+    display: flex;
+    flex-direction: row;
+    justify-self: center;
+    align-content: center;
+    padding: 20px 5px, 5px, 20px;
+    margin: 0 auto;
   }
   .home-button {
     grid-column: 2;
     grid-row: 6;
-    padding: 20px;
+    padding: 40px 10px, 10px, 40px;
     border: none;
-    background-color: #eae5e4;
+    background-color: white;
     margin: auto;
   }
   .home-button:hover {
-    background-color: #ababab;
+    background-color: #eae5e4;
+    border-radius: 10%;
     transition-delay: 0.2s;
   }
   .previous-button {
     grid-column: 1;
     grid-row: 6;
-    padding: 20px;
+    padding: 40px 10px, 10px, 40px;
     border: none;
-    background-color: #eae5e4;
+    background-color: white;
     margin: auto;
   }
   .previous-button:hover {
-    background-color: #ababab;
+    background-color: #eae5e4;
+    border-radius: 10%;
     transition-delay: 0.2s;
   }
   .next-button {
     grid-column: 3;
     grid-row: 6;
-    padding: 20px;
+    padding: 40px 10px, 10px, 40px;
     border: none;
-    background-color: #eae5e4;
+    background-color: white;
     margin: auto;
   }
   .next-button:hover {
-    background-color: #ababab;
+    background-color: #eae5e4;
+    border-radius: 10%;
     transition-delay: 0.2s;
   }
 }

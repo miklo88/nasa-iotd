@@ -8,20 +8,20 @@ export default class DisplayCard {
     //check to see if container already exists
     const cleanup = document.getElementsByClassName("new-card-container");
     const bodyCleanup = document.querySelector("body");
-    console.log(cleanup);
-    console.log(typeof cleanup);
-    console.log(cleanup.length);
-    console.log(bodyCleanup);
+    // console.log(cleanup);
+    // console.log(typeof cleanup);
+    // console.log(cleanup.length);
+    // console.log(bodyCleanup);
     // cleanup.remove();
     // console.log(cleanup);
     if (cleanup.length > 0) {
-      console.log("Delete and build a new containerd");
-      console.log(cleanup);
-      console.log(bodyCleanup);
+      console.log("Delete and build a new container");
+      // console.log(cleanup);
+      // console.log(bodyCleanup);
       let removingItem = cleanup[0];
       removingItem.remove();
       console.log("Removed item", removingItem);
-      console.log(cleanup);
+      // console.log(cleanup);
     } else {
       console.log("NEW CONTAINER RENDER");
       // cleanup.style.display = "none";
@@ -50,6 +50,7 @@ export default class DisplayCard {
     let newCardBody = document.querySelector("body");
     let iotdView = document.getElementById("iotd");
     let nasaContainer = document.getElementById("nasa-images");
+    let buttonContainer = document.createElement("div");
     let homeButton = document.createElement("button");
     let previousButton = document.createElement("button");
     let nextButton = document.createElement("button");
@@ -143,6 +144,7 @@ export default class DisplayCard {
     newCardTitle.className = "new-card-title";
     newCardDateCreated.className = "new-card-date-created";
     newCardDescription.className = "new-card-description";
+    buttonContainer.className = "button-container";
 
     homeButton.className = "home-button";
     previousButton.className = "previous-button";
@@ -162,47 +164,10 @@ export default class DisplayCard {
     newCardContainer.appendChild(newCardTitle);
     newCardContainer.appendChild(newCardDescription);
     newCardContainer.appendChild(newCardDateCreated);
-    newCardContainer.appendChild(homeButton);
-    newCardContainer.appendChild(previousButton);
-    newCardContainer.appendChild(nextButton);
+    newCardContainer.appendChild(buttonContainer);
+    buttonContainer.appendChild(previousButton);
+    buttonContainer.appendChild(homeButton);
+    buttonContainer.appendChild(nextButton);
     newCardBody.appendChild(newCardContainer);
   }
 }
-
-// function clickRight() {
-//   // console.log("RIGHT CLICK", e.target);
-//   console.log("RIGHT CLICK");
-
-//   var cardID = localStorage.getItem("nasa_id");
-//   console.log(cardID);
-//   var state = stateObject.getState();
-
-//   console.log("getState", state);
-
-//   for (var i = 0; state.length > i; i++) {
-//     console.log(state[i]);
-//     if (cardID === state[i]["nasa_id"]) {
-//       console.log(i);
-//       console.log(
-//         `MATCH: cardID ${cardID} and i[nasa_id] ${state[i]["nasa_id"]} match `
-//       );
-//       // newDisplayCard = new DisplayCard();
-//       i++;
-//       var nextItem = {};
-//       nextItem = state[i];
-//       stateObject.moveRight(nextItem);
-//       //call the renderCard function
-//       // console.log("next item in list", i);
-//       console.log(nextItem);
-//       console.log(`NEXT ITEM IN LIST:${i} : ${state[i]["nasa_id"]}`);
-//       console.log(`NEXT ITEM NASA_ID:${state[i]["nasa_id"]}`);
-//       console.log(`NEXT ITEM TITLE:${state[i]["title"]}`);
-//       console.log(`NEXT ITEM DESCRIPTION:${state[i]["description"]}`);
-//       console.log(`NEXT ITEM DATE_CREATED:${state[i]["dateCreated"]}`);
-//       console.log(`NEXT ITEM IMAGE:${state[i]["image"]}`);
-//     } else {
-//       console.log("ELSE HIT");
-//     }
-//   }
-//   console.log("LEAVING MOVE RIGHT");
-// }
