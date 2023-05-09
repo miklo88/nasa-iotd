@@ -1,4 +1,3 @@
-// import showCard from "./showCard.js";
 import StateObject from "/stateObject.js";
 import DisplayCard from "/showCard.js";
 const nasaList = new NASAPopular();
