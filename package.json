@@ -1,0 +1,13 @@
+{
+  "name": "nasa",
+  "version": "1.0.0",
+  "description": "",
+  "main": "client.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "homepage": "https://miklo88.github.io/nasa-iotd/"
+}
