@@ -105,6 +105,7 @@
     grid-template-columns: 1fr, 1fr, 1fr;
     grid-template-rows: 1fr, 1fr, 1fr, 1fr, 1fr, 1fr;
     min-height: 75%;
+    padding: 0 0 50px 0;
   }
 
   .title {
@@ -153,7 +154,7 @@
     flex-direction: row;
     justify-self: center;
     align-content: center;
-    padding: 20px 5px, 5px, 20px;
+    padding: 5px;
     margin: 0 auto;
   }
   .home-button {
