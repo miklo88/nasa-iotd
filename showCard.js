@@ -1,4 +1,4 @@
-import StateObject from "/stateObject.js";
+import StateObject from "./stateObject.js";
 
 //onclick to show the full selected image detail
 export default class DisplayCard {

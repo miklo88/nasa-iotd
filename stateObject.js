@@ -1,4 +1,4 @@
-import DisplayCard from "/showCard.js";
+import DisplayCard from "./showCard.js";
 const nasaList = new NASAPopular();
 
 export default class StateObject {
