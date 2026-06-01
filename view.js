@@ -31,14 +31,14 @@ function startTimer5() {
 
 function renderData(data) {
   //grab obj from broswer. add data to it.
-  // console.log(data);
+  console.log("RESPONSE DATA", data);
   let body = document.querySelector("body");
   let iotdContainer = document.getElementById("iotd");
 
   if (data == undefined || data == null) {
     let titleError = document.createElement("h2");
     titleError = textContent(
-      "Oops, looks like we didn't get what we wanted today. Its ok, fuck it and try again tomorrow :D"
+      "Oops, looks like we had a problem cooking up the image. Try again tomorrow :D"
     );
     body.appendChild(titleError);
   } else {
