@@ -1,0 +1,93 @@
+name: Post APOD to Instagram
+
+# Schedules (all UTC):
+#   02:00 — primary: 9 PM CDT (Mar–Nov) / 8 PM CST (Nov–Mar)
+#   03:00 — recovery #1, fires 1 hour later
+#   06:00 — recovery #2, fires 4 hours later
+#
+# All three fires run the same job. The script's idempotency check (reads
+# logs/YYYY-MM.jsonl for a status:"ok" entry from today UTC) makes the
+# recovery fires no-op if the primary already succeeded.
+#
+# Also exposes a manual "Run workflow" button for test posts. Manual runs
+# default to DRY_RUN=true; uncheck the box for a real publish.
+#
+# IMPORTANT: scheduled triggers only fire on the repo's default branch.
+# Manual (workflow_dispatch) triggers work from any branch.
+on:
+  schedule:
+    - cron: "0 2 * * *"  # primary
+    - cron: "0 3 * * *"  # recovery +1h
+    - cron: "0 6 * * *"  # recovery +4h
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build caption and log it, but skip the actual IG publish (default: true for safety)"
+        type: boolean
+        default: true
+
+# Prevent a recovery cron from racing the primary cron's git push. With
+# cancel-in-progress: false the second fire just waits.
+concurrency:
+  group: post-apod
+  cancel-in-progress: false
+
+# `contents: write` is required so the job can commit the new log line back
+# to the repo. Everything else stays default-read.
+permissions:
+  contents: write
+
+jobs:
+  post:
+    name: Fetch APOD and publish to Instagram
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Layer 2: step-level retry. If the script crashes entirely (in-script
+      # Layer 1 retries exhausted, runner blip, etc.), wait 5 minutes and run
+      # it again. The script's idempotency check prevents a double-post if
+      # the first attempt actually succeeded before crashing.
+      - name: Post to Instagram
+        id: post
+        uses: nick-fields/retry@v3
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          IG_BUSINESS_ACCOUNT_ID: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
+          NASA_API_KEY: ${{ secrets.NASA_API_KEY }}
+          # Schedule triggers don't pass inputs → inputs.dry_run is empty → empty
+          # string in env → script treats as not-true → real post. Manual triggers
+          # respect the checkbox, which defaults to true (dry run).
+          DRY_RUN: ${{ inputs.dry_run }}
+          TRIGGER: ${{ github.event_name }}
+        with:
+          timeout_minutes: 4
+          max_attempts: 2
+          retry_wait_seconds: 300
+          command: node poster/post-apod.mjs
+
+      # Always run, even if the post step failed — we want failures recorded too.
+      # The script writes the log line in its finally block, so by the time
+      # we get here the file is either created or appended.
+      - name: Commit log entry
+        if: always()
+        run: |
+          if [[ -z "$(git status --porcelain logs/ 2>/dev/null)" ]]; then
+            echo "No log changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Pull-rebase in case another commit landed on the branch between
+          # checkout and now — unlikely for a once-a-day job but cheap insurance.
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+          git add logs/
+          git commit -m "log: APOD run $(date -u +%Y-%m-%d) [${{ github.event_name }}]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
