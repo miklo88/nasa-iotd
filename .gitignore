@@ -1,0 +1,15 @@
+# Local setup notes — contain internal IDs, never commit
+SETUP_NOTES.md
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Env / secrets
+.env
+.env.local
+*.token
+secrets/

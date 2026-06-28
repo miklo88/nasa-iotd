@@ -1,0 +1,35 @@
+name: Post APOD to Instagram
+
+# Runs daily at 02:00 UTC (= 9 PM CDT Mar–Nov / 8 PM CST Nov–Mar).
+# Also exposes a manual "Run workflow" button for test posts.
+#
+# IMPORTANT: scheduled triggers only fire on the repo's default branch.
+# Manual (workflow_dispatch) triggers work from any branch.
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  post:
+    name: Fetch APOD and publish to Instagram
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Post to Instagram
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          IG_BUSINESS_ACCOUNT_ID: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
+          NASA_API_KEY: ${{ secrets.NASA_API_KEY }}
+        run: node poster/post-apod.mjs
