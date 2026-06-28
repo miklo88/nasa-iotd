@@ -12,6 +12,14 @@
 //   IG_BUSINESS_ACCOUNT_ID   — the Instagram Business Account ID (e.g. 17841416854670812)
 //   NASA_API_KEY             — NASA APOD API key (DEMO_KEY works but is heavily rate-limited)
 //
+// Optional:
+//   DRY_RUN=true             — Fetch APOD and build the caption, but skip the
+//                              actual IG container-create + publish calls.
+//                              Use for safe verification before a real post.
+//                              When dry-running, the IG token + account ID are
+//                              not required, so this also works for local
+//                              development without any secrets configured.
+//
 // Runs on GitHub Actions cron once per day. Can also be invoked manually
 // via the "Run workflow" button (workflow_dispatch) for test posts.
 
@@ -26,6 +34,8 @@ const {
   NASA_API_KEY = "DEMO_KEY",
 } = process.env;
 
+const DRY_RUN = process.env.DRY_RUN === "true";
+
 function requireEnv(name, value) {
   if (!value) {
     console.error(`❌ Missing required env var: ${name}`);
@@ -33,8 +43,12 @@ function requireEnv(name, value) {
   }
 }
 
-requireEnv("META_ACCESS_TOKEN", META_ACCESS_TOKEN);
-requireEnv("IG_BUSINESS_ACCOUNT_ID", IG_BUSINESS_ACCOUNT_ID);
+// Real posts need IG credentials. Dry runs do not — that lets us
+// safely test caption building locally without any secrets set.
+if (!DRY_RUN) {
+  requireEnv("META_ACCESS_TOKEN", META_ACCESS_TOKEN);
+  requireEnv("IG_BUSINESS_ACCOUNT_ID", IG_BUSINESS_ACCOUNT_ID);
+}
 
 async function fetchAPOD() {
   const url = `${NASA_APOD_URL}?api_key=${encodeURIComponent(NASA_API_KEY)}`;
@@ -124,6 +138,17 @@ async function main() {
 
   const caption = buildCaption(apod);
   console.log(`→ Caption built (${caption.length} chars)`);
+
+  if (DRY_RUN) {
+    console.log("🧪 DRY_RUN=true — skipping Instagram publish.");
+    console.log("─── Caption preview ───────────────────────");
+    console.log(caption);
+    console.log("─── End caption preview ───────────────────");
+    console.log(
+      "Re-run with DRY_RUN unchecked (or unset) to actually post."
+    );
+    return;
+  }
 
   console.log("→ Creating IG media container…");
   const containerId = await createMediaContainer(imageUrl, caption);
