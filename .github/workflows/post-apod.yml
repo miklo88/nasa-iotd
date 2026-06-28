@@ -15,8 +15,10 @@ on:
         type: boolean
         default: true
 
+# `contents: write` is required so the job can commit the new log line back
+# to the repo. Everything else stays default-read.
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   post:
@@ -33,6 +35,7 @@ jobs:
           node-version: "20"
 
       - name: Post to Instagram
+        id: post
         env:
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
           IG_BUSINESS_ACCOUNT_ID: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
@@ -41,4 +44,24 @@ jobs:
           # string in env → script treats as not-true → real post. Manual triggers
           # respect the checkbox, which defaults to true (dry run).
           DRY_RUN: ${{ inputs.dry_run }}
+          TRIGGER: ${{ github.event_name }}
         run: node poster/post-apod.mjs
+
+      # Always run, even if the post step failed — we want failures recorded too.
+      # The script writes the log line in its finally block, so by the time
+      # we get here the file is either created or appended.
+      - name: Commit log entry
+        if: always()
+        run: |
+          if [[ -z "$(git status --porcelain logs/ 2>/dev/null)" ]]; then
+            echo "No log changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Pull-rebase in case another commit landed on the branch between
+          # checkout and now — unlikely for a once-a-day job but cheap insurance.
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+          git add logs/
+          git commit -m "log: APOD run $(date -u +%Y-%m-%d) [${{ github.event_name }}]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
