@@ -28,13 +28,18 @@
 // Runs on GitHub Actions cron once per day. Can also be invoked manually
 // via the "Run workflow" button (workflow_dispatch) for test posts.
 
-import { mkdir, appendFile } from "node:fs/promises";
+import { mkdir, appendFile, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 const GRAPH_API_VERSION = "v21.0";
 const NASA_APOD_URL = "https://api.nasa.gov/planetary/apod";
 const IG_CAPTION_MAX = 2200; // Instagram hard limit
 const EXPLANATION_BUDGET = 1800; // leaves room for title, date, hashtags, credit
+
+// Retry policy: 3 attempts at 1s, 4s, 16s (~21s max wall time per call).
+const RETRY_ATTEMPTS = 3;
+const RETRY_BASE_MS = 1000;
+const RETRY_FACTOR = 4;
 
 const {
   META_ACCESS_TOKEN,
@@ -57,6 +62,69 @@ function requireEnv(name, value) {
 if (!DRY_RUN) {
   requireEnv("META_ACCESS_TOKEN", META_ACCESS_TOKEN);
   requireEnv("IG_BUSINESS_ACCOUNT_ID", IG_BUSINESS_ACCOUNT_ID);
+}
+
+// Module-level retry counter — incremented every time retryWithBackoff
+// schedules a retry. Stamped into the log record at the end of the run
+// so we can grep months later for "days where the APIs were flaky."
+let retryCount = 0;
+
+// Classify an error as transient (worth retrying) vs permanent (won't fix
+// itself with another attempt). Inspects the message format used by our
+// fetchAPOD() and postForm() helpers, plus Node fetch's native errors.
+function isRetryable(err) {
+  if (!err) return false;
+
+  // postForm: "Graph API call failed (503): {...}"
+  const graphMatch = err.message?.match(/Graph API call failed \((\d+)\)/);
+  if (graphMatch) return isRetryableStatus(Number(graphMatch[1]));
+
+  // fetchAPOD: "APOD fetch failed: 503 Service Unavailable"
+  const apodMatch = err.message?.match(/APOD fetch failed: (\d+)/);
+  if (apodMatch) return isRetryableStatus(Number(apodMatch[1]));
+
+  // Native fetch TypeError ("fetch failed", ECONNRESET, ENOTFOUND, etc.)
+  // These have a `cause` with a system error code. Always transient.
+  if (err.cause || err.code === "ECONNRESET" || err.code === "ETIMEDOUT") {
+    return true;
+  }
+
+  return false;
+}
+
+function isRetryableStatus(status) {
+  // 408 timeout, 429 rate limit, 5xx server errors → retry.
+  // 4xx other than 408/429 → permanent (bad auth, bad payload, etc.).
+  return status === 408 || status === 429 || (status >= 500 && status < 600);
+}
+
+async function retryWithBackoff(label, fn) {
+  let lastErr;
+  for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const retryable = isRetryable(err);
+      const isLast = attempt === RETRY_ATTEMPTS;
+      if (!retryable || isLast) {
+        if (!retryable) {
+          console.error(
+            `  ✋ ${label} hit a non-retryable error — giving up: ${err.message}`
+          );
+        }
+        throw err;
+      }
+      const waitMs = RETRY_BASE_MS * Math.pow(RETRY_FACTOR, attempt - 1);
+      console.warn(
+        `  ⚠️  ${label} failed (attempt ${attempt}/${RETRY_ATTEMPTS}): ${err.message}`
+      );
+      console.warn(`  ⏳ Retrying in ${waitMs / 1000}s…`);
+      retryCount++;
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+  throw lastErr;
 }
 
 async function fetchAPOD() {
@@ -138,9 +206,61 @@ async function writeLog(record) {
   console.log(`📝 Logged to ${path}`);
 }
 
+// Idempotency guard — read the current month's log, return the first OK
+// entry whose timestamp matches today (UTC). Used to short-circuit
+// retries (Layer 2 + 3) if the post already succeeded on an earlier run.
+//
+// Why date-based and not apod-date-based? The cron fires at 02:00 UTC.
+// APOD's "date" field follows US Eastern, so an entry's apod_date may
+// not match today's UTC date. But we only want one post per calendar
+// day — and that calendar day is the day the script runs.
+async function findTodaysSuccessfulPost() {
+  const todayUTC = new Date().toISOString().slice(0, 10);
+  const month = todayUTC.slice(0, 7);
+  const path = `logs/${month}.jsonl`;
+  let content;
+  try {
+    content = await readFile(path, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") return null; // first run of the month
+    throw err;
+  }
+  const lines = content.split("\n").filter(Boolean);
+  for (const line of lines) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue; // tolerate malformed lines rather than crash
+    }
+    if (entry.status === "ok" && entry.ts?.startsWith(todayUTC)) {
+      return entry;
+    }
+  }
+  return null;
+}
+
 async function run(record) {
+  // Idempotency guard. Runs FIRST so Layer 2 step retries and Layer 3
+  // recovery crons can fire freely without ever double-posting.
+  // Dry runs deliberately skip this check — re-running dry-run should
+  // always exercise the script fully even if a real post already happened.
+  if (!DRY_RUN) {
+    const existing = await findTodaysSuccessfulPost();
+    if (existing) {
+      console.log(
+        `✅ Already posted today (media_id=${existing.media_id}, at ${existing.ts}).`
+      );
+      console.log("   Skipping — nothing to do.");
+      record.status = "already_posted";
+      record.existing_media_id = existing.media_id;
+      record.apod_date = existing.apod_date;
+      return;
+    }
+  }
+
   console.log("→ Fetching APOD…");
-  const apod = await fetchAPOD();
+  const apod = await retryWithBackoff("APOD fetch", () => fetchAPOD());
   console.log(`  Date:       ${apod.date}`);
   console.log(`  Title:      ${apod.title}`);
   console.log(`  Media type: ${apod.media_type}`);
@@ -177,7 +297,9 @@ async function run(record) {
   }
 
   console.log("→ Creating IG media container…");
-  const containerId = await createMediaContainer(imageUrl, caption);
+  const containerId = await retryWithBackoff("IG container create", () =>
+    createMediaContainer(imageUrl, caption)
+  );
   console.log(`  Container ID: ${containerId}`);
   record.container_id = containerId;
 
@@ -186,7 +308,9 @@ async function run(record) {
   await new Promise((resolve) => setTimeout(resolve, 3000));
 
   console.log("→ Publishing…");
-  const mediaId = await publishMedia(containerId);
+  const mediaId = await retryWithBackoff("IG publish", () =>
+    publishMedia(containerId)
+  );
   console.log(`✅ Published. Media ID: ${mediaId}`);
   record.media_id = mediaId;
   record.status = "ok";
@@ -212,6 +336,7 @@ async function main() {
     exitCode = 1;
   } finally {
     record.duration_ms = Date.now() - startedAt;
+    record.retry_count = retryCount;
     // Log write itself must not crash the process — wrap defensively.
     try {
       await writeLog(record);

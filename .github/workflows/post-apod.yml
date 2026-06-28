@@ -1,19 +1,36 @@
 name: Post APOD to Instagram
 
-# Runs daily at 02:00 UTC (= 9 PM CDT Mar–Nov / 8 PM CST Nov–Mar).
-# Also exposes a manual "Run workflow" button for test posts.
+# Schedules (all UTC):
+#   02:00 — primary: 9 PM CDT (Mar–Nov) / 8 PM CST (Nov–Mar)
+#   03:00 — recovery #1, fires 1 hour later
+#   06:00 — recovery #2, fires 4 hours later
+#
+# All three fires run the same job. The script's idempotency check (reads
+# logs/YYYY-MM.jsonl for a status:"ok" entry from today UTC) makes the
+# recovery fires no-op if the primary already succeeded.
+#
+# Also exposes a manual "Run workflow" button for test posts. Manual runs
+# default to DRY_RUN=true; uncheck the box for a real publish.
 #
 # IMPORTANT: scheduled triggers only fire on the repo's default branch.
 # Manual (workflow_dispatch) triggers work from any branch.
 on:
   schedule:
-    - cron: "0 2 * * *"
+    - cron: "0 2 * * *"  # primary
+    - cron: "0 3 * * *"  # recovery +1h
+    - cron: "0 6 * * *"  # recovery +4h
   workflow_dispatch:
     inputs:
       dry_run:
         description: "Build caption and log it, but skip the actual IG publish (default: true for safety)"
         type: boolean
         default: true
+
+# Prevent a recovery cron from racing the primary cron's git push. With
+# cancel-in-progress: false the second fire just waits.
+concurrency:
+  group: post-apod
+  cancel-in-progress: false
 
 # `contents: write` is required so the job can commit the new log line back
 # to the repo. Everything else stays default-read.
@@ -34,8 +51,13 @@ jobs:
         with:
           node-version: "20"
 
+      # Layer 2: step-level retry. If the script crashes entirely (in-script
+      # Layer 1 retries exhausted, runner blip, etc.), wait 5 minutes and run
+      # it again. The script's idempotency check prevents a double-post if
+      # the first attempt actually succeeded before crashing.
       - name: Post to Instagram
         id: post
+        uses: nick-fields/retry@v3
         env:
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
           IG_BUSINESS_ACCOUNT_ID: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
@@ -45,7 +67,11 @@ jobs:
           # respect the checkbox, which defaults to true (dry run).
           DRY_RUN: ${{ inputs.dry_run }}
           TRIGGER: ${{ github.event_name }}
-        run: node poster/post-apod.mjs
+        with:
+          timeout_minutes: 4
+          max_attempts: 2
+          retry_wait_seconds: 300
+          command: node poster/post-apod.mjs
 
       # Always run, even if the post step failed — we want failures recorded too.
       # The script writes the log line in its finally block, so by the time
