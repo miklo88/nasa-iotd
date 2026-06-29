@@ -1,1 +1,3 @@
 {"ts":"2026-06-29T00:06:46.278Z","trigger":"workflow_dispatch","dry_run":true,"status":"error","error":"APOD fetch failed: 403 Forbidden","duration_ms":456,"retry_count":0}
+{"ts":"2026-06-29T00:21:06.737Z","trigger":"workflow_dispatch","dry_run":true,"status":"error","error":"APOD fetch failed: 403 Forbidden","duration_ms":433,"retry_count":0}
+{"ts":"2026-06-29T00:22:07.739Z","trigger":"workflow_dispatch","dry_run":true,"status":"error","error":"APOD fetch failed: 403 Forbidden","duration_ms":160,"retry_count":0}
