@@ -41,7 +41,11 @@ jobs:
   post:
     name: Fetch APOD and publish to Instagram
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Must accommodate Layer 2's worst case:
+    #   attempt 1 (4 min) + wait (1 min) + attempt 2 (4 min) ≈ 9 min.
+    # 15 leaves comfortable headroom for checkout, setup-node, and commit-log
+    # steps without ever cutting off mid-retry.
+    timeout-minutes: 15
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -49,12 +53,18 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # Node 22 is the current LTS (supported through April 2027).
+          # Node 20 still works but emits a deprecation warning on every run.
+          node-version: "22"
 
       # Layer 2: step-level retry. If the script crashes entirely (in-script
-      # Layer 1 retries exhausted, runner blip, etc.), wait 5 minutes and run
-      # it again. The script's idempotency check prevents a double-post if
-      # the first attempt actually succeeded before crashing.
+      # Layer 1 retries exhausted, runner blip, etc.), wait 60 seconds and
+      # run it again. The script's idempotency check prevents a double-post
+      # if the first attempt actually succeeded before crashing.
+      #
+      # Why 60s and not 300s? Transient API blips usually clear in seconds
+      # to a couple minutes; a 5-min wait mostly burns wall clock without
+      # materially improving odds of recovery.
       - name: Post to Instagram
         id: post
         uses: nick-fields/retry@v3
@@ -70,7 +80,7 @@ jobs:
         with:
           timeout_minutes: 4
           max_attempts: 2
-          retry_wait_seconds: 300
+          retry_wait_seconds: 60
           command: node poster/post-apod.mjs
 
       # Always run, even if the post step failed — we want failures recorded too.
