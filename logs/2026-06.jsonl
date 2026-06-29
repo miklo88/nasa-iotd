@@ -1,0 +1,1 @@
+{"ts":"2026-06-29T00:06:46.278Z","trigger":"workflow_dispatch","dry_run":true,"status":"error","error":"APOD fetch failed: 403 Forbidden","duration_ms":456,"retry_count":0}
