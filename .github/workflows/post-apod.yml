@@ -1,9 +1,16 @@
 name: Post APOD to Instagram
 
-# Schedules (all UTC):
-#   02:00 — primary: 9 PM CDT (Mar–Nov) / 8 PM CST (Nov–Mar)
-#   03:00 — recovery #1, fires 1 hour later
-#   06:00 — recovery #2, fires 4 hours later
+# Schedules (all UTC). Times chosen to compensate for GitHub Actions'
+# scheduled-workflow queue delay, which empirically runs ~60–90 min for
+# this repo. Goal is for the *actual* post to land near 9 PM CT.
+#
+#   01:13 — primary: 8:13 PM CDT (Mar–Nov) / 7:13 PM CST (Nov–Mar) scheduled
+#           → typical actual post around 9:15–9:45 PM CT
+#   03:13 — recovery #1, +2h — catches primary if unusually delayed
+#   05:13 — recovery #2, +4h — final safety net
+#
+# The :13 minute (instead of :00) dodges the top-of-hour queue congestion
+# that hits GitHub Actions every hour on the hour.
 #
 # All three fires run the same job. The script's idempotency check (reads
 # logs/YYYY-MM.jsonl for a status:"ok" entry from today UTC) makes the
@@ -16,9 +23,9 @@ name: Post APOD to Instagram
 # Manual (workflow_dispatch) triggers work from any branch.
 on:
   schedule:
-    - cron: "0 2 * * *"  # primary
-    - cron: "0 3 * * *"  # recovery +1h
-    - cron: "0 6 * * *"  # recovery +4h
+    - cron: "13 1 * * *"  # primary  (01:13 UTC = 8:13 PM CDT / 7:13 PM CST)
+    - cron: "13 3 * * *"  # recovery +2h
+    - cron: "13 5 * * *"  # recovery +4h
   workflow_dispatch:
     inputs:
       dry_run:
