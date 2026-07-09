@@ -23,3 +23,4 @@
 {"ts":"2026-07-09T01:51:25.432Z","trigger":"schedule","dry_run":false,"status":"error","error":"APOD fetch failed: 500 Internal Server Error","duration_ms":6681,"retry_count":2}
 {"ts":"2026-07-09T01:52:32.446Z","trigger":"schedule","dry_run":false,"status":"error","error":"APOD fetch failed: 500 Internal Server Error","duration_ms":6171,"retry_count":2}
 {"ts":"2026-07-09T04:33:01.142Z","trigger":"schedule","dry_run":false,"status":"ok","apod_date":"2026-07-09","apod_title":"The Red Glow of the Cosmic Bat Nebula","apod_media_type":"image","apod_url":"https://apod.nasa.gov/apod/image/2607/cosmic_bat_halpha_1024.jpg","media_kind":"image","caption_length":927,"container_id":"18132169921561823","media_id":"18101865176154825","duration_ms":18070,"retry_count":0}
+{"ts":"2026-07-09T06:29:30.263Z","trigger":"schedule","dry_run":false,"status":"already_posted","existing_media_id":"18101865176154825","apod_date":"2026-07-09","duration_ms":5,"retry_count":0}
