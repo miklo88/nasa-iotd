@@ -49,10 +49,11 @@ jobs:
     name: Fetch APOD and publish to Instagram
     runs-on: ubuntu-latest
     # Must accommodate Layer 2's worst case:
-    #   attempt 1 (4 min) + wait (1 min) + attempt 2 (4 min) ≈ 9 min.
-    # 15 leaves comfortable headroom for checkout, setup-node, and commit-log
-    # steps without ever cutting off mid-retry.
-    timeout-minutes: 15
+    #   attempt 1 (6 min) + wait (1 min) + attempt 2 (6 min) ≈ 13 min.
+    # 20 leaves comfortable headroom for checkout, setup-node, and commit-log
+    # steps without ever cutting off mid-retry. Video (Reels) days need the
+    # bigger budget because IG async video processing can take 1–4 minutes.
+    timeout-minutes: 20
     steps:
       - name: Check out repo
         uses: actions/checkout@v5
@@ -85,7 +86,9 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           TRIGGER: ${{ github.event_name }}
         with:
-          timeout_minutes: 4
+          # 6 min per attempt: images finish in ~15 s, videos need up to
+          # ~4 min of async processing polling + a few seconds to publish.
+          timeout_minutes: 6
           max_attempts: 2
           retry_wait_seconds: 60
           command: node poster/post-apod.mjs

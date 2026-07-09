@@ -3,7 +3,11 @@
 //
 // What this does:
 //   1. Fetches NASA's Astronomy Picture of the Day.
-//   2. If today's APOD is a video, exits silently (v1 only handles images).
+//   2. Dispatches on media type:
+//       - image        → posts to feed as an image (single container + publish)
+//       - direct video → posts as a Reel with share_to_feed=true; needs a
+//                        polling step because IG processes video async
+//       - embed video  → skipped (IG cannot fetch YouTube/Vimeo URLs)
 //   3. Builds a caption from the title + explanation + hashtags.
 //   4. Creates an Instagram media container, then publishes it.
 //   5. Appends a structured JSON line to logs/YYYY-MM.jsonl (always — even
@@ -183,16 +187,68 @@ async function postForm(endpoint, params) {
   return data;
 }
 
-async function createMediaContainer(imageUrl, caption) {
+async function createImageContainer(imageUrl, caption) {
   const endpoint = `https://graph.facebook.com/${GRAPH_API_VERSION}/${IG_BUSINESS_ACCOUNT_ID}/media`;
   const data = await postForm(endpoint, { image_url: imageUrl, caption });
   return data.id;
+}
+
+// Post video as a Reel. share_to_feed=true keeps it visible on the main
+// grid (not just the Reels tab), same as the image posts.
+async function createVideoContainer(videoUrl, caption) {
+  const endpoint = `https://graph.facebook.com/${GRAPH_API_VERSION}/${IG_BUSINESS_ACCOUNT_ID}/media`;
+  const data = await postForm(endpoint, {
+    media_type: "REELS",
+    video_url: videoUrl,
+    caption,
+    share_to_feed: "true",
+  });
+  return data.id;
+}
+
+// Instagram processes video containers asynchronously — you can't publish
+// until status_code === "FINISHED". Poll every 5s for up to 4 min.
+// Statuses: IN_PROGRESS, FINISHED, ERROR, EXPIRED, PUBLISHED.
+async function pollContainerReady(
+  containerId,
+  { timeoutMs = 4 * 60 * 1000, intervalMs = 5000 } = {}
+) {
+  const endpoint =
+    `https://graph.facebook.com/${GRAPH_API_VERSION}/${containerId}` +
+    `?fields=status_code,status&access_token=${encodeURIComponent(META_ACCESS_TOKEN)}`;
+  const startedAt = Date.now();
+  let lastStatus;
+  while (Date.now() - startedAt < timeoutMs) {
+    const res = await fetch(endpoint);
+    const data = await res.json().catch(() => ({}));
+    lastStatus = data.status_code;
+    console.log(`  ⏳ container ${containerId} status: ${lastStatus || "?"}`);
+    if (lastStatus === "FINISHED") return;
+    if (lastStatus === "ERROR" || lastStatus === "EXPIRED") {
+      throw new Error(
+        `Container ${containerId} unusable (${lastStatus}): ${JSON.stringify(data)}`
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error(
+    `Container ${containerId} did not finish processing within ` +
+      `${timeoutMs / 1000}s (last status: ${lastStatus})`
+  );
 }
 
 async function publishMedia(creationId) {
   const endpoint = `https://graph.facebook.com/${GRAPH_API_VERSION}/${IG_BUSINESS_ACCOUNT_ID}/media_publish`;
   const data = await postForm(endpoint, { creation_id: creationId });
   return data.id;
+}
+
+// APOD's video days come in two flavors:
+//   1. Direct .mp4 or .mov files hosted on apod.nasa.gov — IG can ingest these
+//      via video_url. This is what we support.
+//   2. Embedded YouTube / Vimeo URLs — IG cannot fetch these; skip.
+function isDirectVideoFile(url) {
+  return /\.(mp4|mov)(\?.*)?$/i.test(url || "");
 }
 
 // Append a single structured line to logs/YYYY-MM.jsonl.
@@ -270,24 +326,39 @@ async function run(record) {
   record.apod_media_type = apod.media_type;
   record.apod_url = apod.url;
 
-  if (apod.media_type !== "image") {
-    console.log("⏭  Today's APOD is not an image — skipping.");
-    record.status = "skipped_non_image";
+  // Decide the publish path.
+  //   image                                → post to feed as image
+  //   video + direct .mp4/.mov URL         → post as Reel (share_to_feed=true)
+  //   video + embed URL (YouTube/Vimeo)    → skip (IG can't fetch embeds)
+  //   anything else                        → skip
+  let mediaKind;
+  if (apod.media_type === "image") {
+    mediaKind = "image";
+  } else if (
+    apod.media_type === "video" &&
+    isDirectVideoFile(apod.url)
+  ) {
+    mediaKind = "video";
+  } else {
+    console.log(
+      `⏭  Skipping — media_type=${apod.media_type}, url=${apod.url} is not a supported format.`
+    );
+    record.status = "skipped_unsupported_media";
     return;
   }
+  record.media_kind = mediaKind;
 
-  // APOD provides `url` (standard res) and sometimes `hdurl`. Standard res is
-  // already plenty for IG (max 1080px wide displayed) and smaller payload =
-  // less chance of IG fetch timeout.
-  const imageUrl = apod.url;
-  console.log(`  Image URL:  ${imageUrl}`);
+  const mediaUrl = apod.url;
+  console.log(`  Media URL:  ${mediaUrl}`);
 
   const caption = buildCaption(apod);
   console.log(`→ Caption built (${caption.length} chars)`);
   record.caption_length = caption.length;
 
   if (DRY_RUN) {
-    console.log("🧪 DRY_RUN=true — skipping Instagram publish.");
+    console.log(
+      `🧪 DRY_RUN=true — would post as ${mediaKind}, skipping Instagram publish.`
+    );
     console.log("─── Caption preview ───────────────────────");
     console.log(caption);
     console.log("─── End caption preview ───────────────────");
@@ -296,16 +367,31 @@ async function run(record) {
     return;
   }
 
-  console.log("→ Creating IG media container…");
-  const containerId = await retryWithBackoff("IG container create", () =>
-    createMediaContainer(imageUrl, caption)
-  );
-  console.log(`  Container ID: ${containerId}`);
-  record.container_id = containerId;
+  let containerId;
+  if (mediaKind === "image") {
+    console.log("→ Creating IG image container…");
+    containerId = await retryWithBackoff("IG image container create", () =>
+      createImageContainer(mediaUrl, caption)
+    );
+    console.log(`  Container ID: ${containerId}`);
+    record.container_id = containerId;
 
-  // For images the container is normally ready instantly. Brief wait is
-  // defensive against very occasional IG-side processing lag.
-  await new Promise((resolve) => setTimeout(resolve, 3000));
+    // For images the container is normally ready instantly. Brief wait is
+    // defensive against very occasional IG-side processing lag.
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  } else {
+    console.log("→ Creating IG video (Reels) container…");
+    containerId = await retryWithBackoff("IG video container create", () =>
+      createVideoContainer(mediaUrl, caption)
+    );
+    console.log(`  Container ID: ${containerId}`);
+    record.container_id = containerId;
+
+    // Videos require IG to fetch, transcode, and prepare the file. Poll until
+    // the container reports FINISHED or throws (ERROR/EXPIRED/timeout).
+    console.log("→ Waiting for IG to process video…");
+    await pollContainerReady(containerId);
+  }
 
   console.log("→ Publishing…");
   const mediaId = await retryWithBackoff("IG publish", () =>
