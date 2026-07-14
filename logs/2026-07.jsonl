@@ -37,3 +37,4 @@
 {"ts":"2026-07-13T04:22:11.452Z","trigger":"schedule","dry_run":false,"status":"already_posted","existing_media_id":"17870598012689887","apod_date":"2026-07-12","duration_ms":5,"retry_count":0}
 {"ts":"2026-07-13T06:23:18.736Z","trigger":"schedule","dry_run":false,"status":"already_posted","existing_media_id":"17870598012689887","apod_date":"2026-07-12","duration_ms":5,"retry_count":0}
 {"ts":"2026-07-14T01:50:46.117Z","trigger":"schedule","dry_run":false,"status":"ok","apod_date":"2026-07-13","apod_title":"Auroras from Space","apod_media_type":"video","apod_url":"https://apod.nasa.gov/apod/image/2607/Auroras_Esa.mp4","media_kind":"video","caption_length":1135,"container_id":"18133488310561823","media_id":"18075949223328259","duration_ms":43499,"retry_count":0}
+{"ts":"2026-07-14T04:14:09.215Z","trigger":"schedule","dry_run":false,"status":"already_posted","existing_media_id":"18075949223328259","apod_date":"2026-07-13","duration_ms":6,"retry_count":0}
