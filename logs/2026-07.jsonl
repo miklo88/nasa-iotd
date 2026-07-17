@@ -48,3 +48,4 @@
 {"ts":"2026-07-17T01:50:57.641Z","trigger":"schedule","dry_run":false,"status":"error","error":"APOD fetch failed: 500 Internal Server Error","duration_ms":6428,"retry_count":2}
 {"ts":"2026-07-17T01:52:04.652Z","trigger":"schedule","dry_run":false,"status":"error","error":"APOD fetch failed: 500 Internal Server Error","duration_ms":7464,"retry_count":2}
 {"ts":"2026-07-17T04:16:11.495Z","trigger":"schedule","dry_run":false,"status":"ok","apod_date":"2026-07-17","apod_title":"The Dust Trail of Comet Tempel 2","apod_media_type":"image","apod_url":"https://apod.nasa.gov/apod/image/2607/10P_Tempel2_20260711_DEBartlett1024.jpg","media_kind":"image","caption_length":1070,"container_id":"18134246908561823","media_id":"18370795603236037","duration_ms":13660,"retry_count":0}
+{"ts":"2026-07-17T06:03:02.345Z","trigger":"schedule","dry_run":false,"status":"already_posted","existing_media_id":"18370795603236037","apod_date":"2026-07-17","duration_ms":4,"retry_count":0}
