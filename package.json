@@ -9,5 +9,8 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "homepage": "https://miklo88.github.io/nasa-iotd/"
+  "homepage": "https://miklo88.github.io/nasa-iotd/",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.114.0"
+  }
 }

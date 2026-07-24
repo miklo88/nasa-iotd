@@ -4,6 +4,9 @@ SETUP_NOTES.md
 # macOS
 .DS_Store
 
+# Dependencies (restored from package-lock.json via `npm ci`)
+node_modules/
+
 # Editor
 .vscode/
 .idea/

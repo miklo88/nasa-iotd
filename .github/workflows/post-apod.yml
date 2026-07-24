@@ -65,6 +65,11 @@ jobs:
           # Node 20 still works but emits a deprecation warning on every run.
           node-version: "22"
 
+      # Install deps from the committed lockfile. Required now that the
+      # script imports @anthropic-ai/sdk for hashtag generation.
+      - name: Install dependencies
+        run: npm ci
+
       # Layer 2: step-level retry. If the script crashes entirely (in-script
       # Layer 1 retries exhausted, runner blip, etc.), wait 60 seconds and
       # run it again. The script's idempotency check prevents a double-post
@@ -80,6 +85,7 @@ jobs:
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
           IG_BUSINESS_ACCOUNT_ID: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
           NASA_API_KEY: ${{ secrets.NASA_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # Schedule triggers don't pass inputs → inputs.dry_run is empty → empty
           # string in env → script treats as not-true → real post. Manual triggers
           # respect the checkbox, which defaults to true (dry run).
