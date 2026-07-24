@@ -34,6 +34,7 @@
 
 import { mkdir, appendFile, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import Anthropic from "@anthropic-ai/sdk";
 
 const GRAPH_API_VERSION = "v21.0";
 const NASA_APOD_URL = "https://api.nasa.gov/planetary/apod";
@@ -49,6 +50,7 @@ const {
   META_ACCESS_TOKEN,
   IG_BUSINESS_ACCOUNT_ID,
   NASA_API_KEY = "DEMO_KEY",
+  ANTHROPIC_API_KEY,
 } = process.env;
 
 const DRY_RUN = process.env.DRY_RUN === "true";
@@ -140,19 +142,240 @@ async function fetchAPOD() {
   return res.json();
 }
 
-function buildCaption({ title, explanation, date, copyright }) {
-  const hashtags = [
-    "#nasa",
-    "#apod",
-    "#astronomy",
-    "#space",
-    "#astrophotography",
-    "#cosmos",
-    "#universe",
-    "#nightsky",
-    "#science",
-    "#nasaapod",
-  ].join(" ");
+// ── Hashtag generation ──────────────────────────────────────────────────
+//
+// Instagram suppresses posts from Explore/recommendations when they carry
+// more than 5 hashtags, so we cap at 5 and spend each slot on a distinct
+// *classification* rather than piling on synonyms. Slots:
+//
+//   1. anchor        — always "#apod" (our brand/discovery anchor)
+//   2. object_class  — what kind of object (#nebula, #galaxy, #aurora…)
+//   3. named_subject — the specific named thing (#orionnebula, #jupiter…)
+//   4. community     — the audience community (#astrophotography…)
+//   5. source        — instrument/mission when relevant (#jwst, #hubble…)
+//
+// A Haiku call picks the slots from the APOD title + explanation. Every
+// suggestion is validated in code against approved lists (object_class,
+// community, source) or, for the free-form named_subject, against a
+// hallucination guard: the model must quote a verbatim substring of the
+// APOD text as evidence. Anything that fails validation is dropped, never
+// posted. If the whole call fails (no key, API error, bad JSON), we fall
+// back to a safe static set so a tagging problem never blocks a post.
+
+const HASHTAG_MODEL = "claude-haiku-4-5";
+const HASHTAG_ANCHOR = "apod";
+const HASHTAG_FALLBACK = ["apod", "astrophotography", "astronomy"];
+
+// Approved object-class tags. The model must pick from this list (it maps
+// the APOD subject to the closest class); anything off-list is dropped.
+const OBJECT_CLASS_TAGS = new Set([
+  "nebula",
+  "galaxy",
+  "starcluster",
+  "supernova",
+  "aurora",
+  "comet",
+  "meteor",
+  "eclipse",
+  "moon",
+  "sun",
+  "solareclipse",
+  "lunareclipse",
+  "milkyway",
+  "planet",
+  "star",
+  "blackhole",
+  "galaxycluster",
+  "nightsky",
+  "deepsky",
+  "constellation",
+  "sunset",
+  "planetarynebula",
+  "spiralgalaxy",
+  "cometnucleus",
+  "asteroid",
+]);
+
+// Approved audience-community tags.
+const COMMUNITY_TAGS = new Set([
+  "astrophotography",
+  "deepskyastrophotography",
+  "astronomy",
+  "spacephotography",
+]);
+
+// Approved source/instrument tags.
+const SOURCE_TAGS = new Set([
+  "jwst",
+  "hubbletelescope",
+  "chandra",
+  "esa",
+  "timelapse",
+]);
+
+const HASHTAG_TOKEN_RE = /^[a-z0-9]{3,30}$/;
+
+// Normalize a model-suggested tag to a bare token: strip leading '#',
+// lowercase, remove any non-alphanumerics. Returns "" if nothing usable.
+function normalizeTag(raw) {
+  if (typeof raw !== "string") return "";
+  return raw
+    .trim()
+    .replace(/^#/, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+const HASHTAG_SCHEMA = {
+  type: "object",
+  properties: {
+    object_class: {
+      type: "string",
+      description:
+        "The single closest object-class tag for the APOD subject, chosen " +
+        "from the approved list. Empty string if none fits.",
+    },
+    named_subject: {
+      type: "string",
+      description:
+        "A hashtag for the specific named subject (e.g. 'orionnebula' for " +
+        "the Orion Nebula, 'jupiter' for Jupiter). Lowercase, no spaces or " +
+        "punctuation. Empty string if the APOD has no specific named subject.",
+    },
+    named_subject_evidence: {
+      type: "string",
+      description:
+        "A short verbatim quote copied EXACTLY from the APOD title or " +
+        "explanation that proves the named_subject appears in the text. " +
+        "Must be an exact substring. Empty string if named_subject is empty.",
+    },
+    community: {
+      type: "string",
+      description:
+        "The best audience-community tag from the approved list. Empty " +
+        "string if none fits.",
+    },
+    source: {
+      type: "string",
+      description:
+        "The instrument/mission/source tag from the approved list if the " +
+        "APOD text clearly indicates one, else empty string.",
+    },
+  },
+  required: [
+    "object_class",
+    "named_subject",
+    "named_subject_evidence",
+    "community",
+    "source",
+  ],
+  additionalProperties: false,
+};
+
+// Ask Haiku to classify the APOD into hashtag slots, validate every
+// suggestion in code, and return an ordered, deduped, ≤5 array of bare
+// tag tokens (no '#'). Never throws — returns the static fallback on any
+// failure so a tagging problem can't block a post.
+async function generateHashtags({ title, explanation }) {
+  if (!ANTHROPIC_API_KEY) {
+    console.warn(
+      "  ⚠️  ANTHROPIC_API_KEY not set — using static fallback hashtags."
+    );
+    return [...HASHTAG_FALLBACK];
+  }
+
+  const text = `${title}\n\n${explanation}`;
+  const haystack = text.toLowerCase();
+
+  const system =
+    "You classify NASA Astronomy Picture of the Day entries into Instagram " +
+    "hashtag slots. Choose object_class, community, and source ONLY from the " +
+    "approved lists below — if nothing fits a slot, return an empty string " +
+    "for it. For named_subject, produce a hashtag for the specific named " +
+    "astronomical object in the APOD, and copy a verbatim substring of the " +
+    "provided text into named_subject_evidence to prove it appears. Never " +
+    "invent a subject that is not in the text.\n\n" +
+    `Approved object_class: ${[...OBJECT_CLASS_TAGS].join(", ")}\n` +
+    `Approved community: ${[...COMMUNITY_TAGS].join(", ")}\n` +
+    `Approved source: ${[...SOURCE_TAGS].join(", ")}`;
+
+  let slots;
+  try {
+    const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+    const response = await client.messages.create({
+      model: HASHTAG_MODEL,
+      max_tokens: 512,
+      system,
+      messages: [
+        {
+          role: "user",
+          content:
+            `APOD title and explanation:\n\n${text}\n\n` +
+            "Return the hashtag slots for this entry.",
+        },
+      ],
+      output_config: {
+        format: { type: "json_schema", schema: HASHTAG_SCHEMA },
+      },
+    });
+    const raw = response.content.find((b) => b.type === "text")?.text ?? "";
+    slots = JSON.parse(raw);
+  } catch (err) {
+    console.warn(
+      `  ⚠️  Hashtag generation failed (${err.message || err}) — using fallback.`
+    );
+    return [...HASHTAG_FALLBACK];
+  }
+
+  const tags = [HASHTAG_ANCHOR];
+
+  const objectClass = normalizeTag(slots.object_class);
+  if (OBJECT_CLASS_TAGS.has(objectClass)) tags.push(objectClass);
+
+  // named_subject is free-form, so guard against hallucination: the model's
+  // cited evidence must be a real substring of the APOD text.
+  const named = normalizeTag(slots.named_subject);
+  const evidence =
+    typeof slots.named_subject_evidence === "string"
+      ? slots.named_subject_evidence.trim().toLowerCase()
+      : "";
+  if (
+    named &&
+    HASHTAG_TOKEN_RE.test(named) &&
+    evidence.length >= 3 &&
+    haystack.includes(evidence)
+  ) {
+    tags.push(named);
+  } else if (named) {
+    console.warn(
+      `  ⚠️  Dropping named_subject "#${named}" — evidence not found in APOD text.`
+    );
+  }
+
+  const community = normalizeTag(slots.community);
+  if (COMMUNITY_TAGS.has(community)) tags.push(community);
+
+  const source = normalizeTag(slots.source);
+  if (SOURCE_TAGS.has(source)) tags.push(source);
+
+  // Dedupe preserving order, then cap at Instagram's 5-tag sweet spot.
+  const deduped = [...new Set(tags)].slice(0, 5);
+
+  // Guarantee at least the anchor + a couple of safe community tags so we
+  // never post a bare single tag if the model returned mostly empties.
+  if (deduped.length < 3) {
+    for (const t of HASHTAG_FALLBACK) {
+      if (!deduped.includes(t) && deduped.length < 5) deduped.push(t);
+    }
+  }
+
+  return deduped;
+}
+
+function buildCaption({ title, explanation, date, copyright }, hashtagTokens) {
+  const hashtags = (hashtagTokens?.length ? hashtagTokens : HASHTAG_FALLBACK)
+    .map((t) => `#${t}`)
+    .join(" ");
 
   const credit = copyright
     ? `📷 Image credit: ${copyright.trim()} / NASA APOD`
@@ -351,7 +574,12 @@ async function run(record) {
   const mediaUrl = apod.url;
   console.log(`  Media URL:  ${mediaUrl}`);
 
-  const caption = buildCaption(apod);
+  console.log("→ Generating hashtags…");
+  const hashtags = await generateHashtags(apod);
+  console.log(`  Hashtags: ${hashtags.map((t) => `#${t}`).join(" ")}`);
+  record.hashtags = hashtags;
+
+  const caption = buildCaption(apod, hashtags);
   console.log(`→ Caption built (${caption.length} chars)`);
   record.caption_length = caption.length;
 
