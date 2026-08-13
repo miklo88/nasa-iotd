@@ -37,3 +37,5 @@
 {"ts":"2026-08-12T05:46:04.196Z","trigger":"schedule","dry_run":false,"status":"already_posted","existing_media_id":"17955565077197952","apod_date":"2026-08-11","duration_ms":8,"retry_count":0}
 {"ts":"2026-08-13T01:49:37.605Z","trigger":"schedule","dry_run":false,"status":"error","error":"APOD fetch failed: 500 Internal Server Error","duration_ms":5872,"retry_count":2}
 {"ts":"2026-08-13T01:50:44.473Z","trigger":"schedule","dry_run":false,"status":"error","error":"APOD fetch failed: 500 Internal Server Error","duration_ms":7801,"retry_count":2}
+{"ts":"2026-08-13T03:54:31.354Z","trigger":"schedule","dry_run":false,"status":"error","error":"APOD fetch failed: 500 Internal Server Error","duration_ms":6418,"retry_count":2}
+{"ts":"2026-08-13T03:55:38.364Z","trigger":"schedule","dry_run":false,"status":"error","error":"APOD fetch failed: 500 Internal Server Error","duration_ms":6303,"retry_count":2}
