@@ -485,14 +485,11 @@ async function writeLog(record) {
   console.log(`📝 Logged to ${path}`);
 }
 
-// Idempotency guard — read the current month's log, return the first OK
-// entry whose timestamp matches today (UTC). Used to short-circuit
-// retries (Layer 2 + 3) if the post already succeeded on an earlier run.
-//
-// Why date-based and not apod-date-based? The cron fires at 02:00 UTC.
-// APOD's "date" field follows US Eastern, so an entry's apod_date may
-// not match today's UTC date. But we only want one post per calendar
-// day — and that calendar day is the day the script runs.
+// Idempotency guard #1 (fast path) — read the current month's log, return
+// the first OK entry whose run timestamp matches today (UTC). Runs BEFORE
+// the APOD fetch so recovery crons short-circuit cheaply without hitting
+// NASA again. With the mid-day schedule (all three fires land on the same
+// UTC calendar day), this reliably catches the "already posted today" case.
 async function findTodaysSuccessfulPost() {
   const todayUTC = new Date().toISOString().slice(0, 10);
   const month = todayUTC.slice(0, 7);
@@ -513,6 +510,39 @@ async function findTodaysSuccessfulPost() {
       continue; // tolerate malformed lines rather than crash
     }
     if (entry.status === "ok" && entry.ts?.startsWith(todayUTC)) {
+      return entry;
+    }
+  }
+  return null;
+}
+
+// Idempotency guard #2 (authoritative) — has THIS SPECIFIC APOD already
+// been posted successfully? Keyed on the APOD's own date (the identity of
+// the photo), not the run's calendar day. This is the real "same photo,
+// never twice" check: it holds even if two fires straddle a UTC midnight,
+// if a run is manually retried on another day, or if NASA hasn't rolled the
+// APOD over yet (in which case we'd re-fetch yesterday's photo — and skip).
+// Runs AFTER the fetch, once we know which APOD we're actually looking at.
+// The log is bucketed by apod_date's month, so we read exactly that file.
+async function findSuccessfulPostForApodDate(apodDate) {
+  if (!apodDate) return null;
+  const month = apodDate.slice(0, 7);
+  const path = `logs/${month}.jsonl`;
+  let content;
+  try {
+    content = await readFile(path, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") return null;
+    throw err;
+  }
+  for (const line of content.split("\n").filter(Boolean)) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (entry.status === "ok" && entry.apod_date === apodDate) {
       return entry;
     }
   }
@@ -548,6 +578,24 @@ async function run(record) {
   record.apod_title = apod.title;
   record.apod_media_type = apod.media_type;
   record.apod_url = apod.url;
+
+  // Idempotency guard #2 — same photo, never twice. If this exact APOD
+  // (by its date) was already posted OK, stop here and wait for tomorrow's
+  // photo. This is what actually kills the double-posts: an early-hours fire
+  // and a later scheduled fire can both wake up on the same APOD, but only
+  // the first one gets to publish it.
+  if (!DRY_RUN) {
+    const dup = await findSuccessfulPostForApodDate(apod.date);
+    if (dup) {
+      console.log(
+        `✅ APOD ${apod.date} already posted (media_id=${dup.media_id}, at ${dup.ts}).`
+      );
+      console.log("   Skipping — will wait for tomorrow's APOD.");
+      record.status = "already_posted";
+      record.existing_media_id = dup.media_id;
+      return;
+    }
+  }
 
   // Decide the publish path.
   //   image                                → post to feed as image
