@@ -2,19 +2,26 @@ name: Post APOD to Instagram
 
 # Schedules (all UTC). Times chosen to compensate for GitHub Actions'
 # scheduled-workflow queue delay, which empirically runs ~60–90 min for
-# this repo. Goal is for the *actual* post to land near 9 PM CT.
+# this repo. Goal is for the *actual* post to land near 11 AM CT so it
+# catches people over their lunch break.
 #
-#   01:13 — primary: 8:13 PM CDT (Mar–Nov) / 7:13 PM CST (Nov–Mar) scheduled
-#           → typical actual post around 9:15–9:45 PM CT
-#   03:13 — recovery #1, +2h — catches primary if unusually delayed
-#   05:13 — recovery #2, +4h — final safety net
+#   15:13 — primary: 10:13 AM CDT (Mar–Nov) / 9:13 AM CST (Nov–Mar) scheduled
+#           → typical actual post around 11:15–11:45 AM CT
+#   17:13 — recovery #1, +2h — catches primary if unusually delayed
+#   19:13 — recovery #2, +4h — final safety net
+#
+# All three fires happen mid-day UTC, comfortably after APOD's ~05:00 UTC
+# daily rollover, so every fire sees the same (current-day) photo. That,
+# plus the two idempotency guards below, is what stops the double posts.
 #
 # The :13 minute (instead of :00) dodges the top-of-hour queue congestion
 # that hits GitHub Actions every hour on the hour.
 #
-# All three fires run the same job. The script's idempotency check (reads
-# logs/YYYY-MM.jsonl for a status:"ok" entry from today UTC) makes the
-# recovery fires no-op if the primary already succeeded.
+# All three fires run the same job. Two idempotency guards in the script
+# prevent double-posting: (1) a per-UTC-day check that short-circuits before
+# the APOD fetch, and (2) an authoritative per-APOD-date check that refuses
+# to publish the same photo twice. Once a day's APOD posts OK, every later
+# fire that day no-ops.
 #
 # Also exposes a manual "Run workflow" button for test posts. Manual runs
 # default to DRY_RUN=true; uncheck the box for a real publish.
@@ -23,9 +30,9 @@ name: Post APOD to Instagram
 # Manual (workflow_dispatch) triggers work from any branch.
 on:
   schedule:
-    - cron: "13 1 * * *"  # primary  (01:13 UTC = 8:13 PM CDT / 7:13 PM CST)
-    - cron: "13 3 * * *"  # recovery +2h
-    - cron: "13 5 * * *"  # recovery +4h
+    - cron: "13 15 * * *"  # primary  (15:13 UTC = 10:13 AM CDT / 9:13 AM CST)
+    - cron: "13 17 * * *"  # recovery +2h
+    - cron: "13 19 * * *"  # recovery +4h
   workflow_dispatch:
     inputs:
       dry_run:
