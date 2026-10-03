@@ -85,7 +85,11 @@ const SLICE_DIR = "slices";
 // Anything that is not a modest JPEG gets re-encoded through the same
 // pipeline as the slices. That 36 MB PNG lands at ~550 KB.
 const IG_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-const SLICE_RETENTION_DAYS = 30; // prune older slice sets so the repo stays small
+// Instagram keeps its own copy once a post is published, so slices only have
+// to outlive the publish call. A week is plenty of margin for inspecting a
+// recent post. Pruning runs on every run, not just slice days, or the window
+// would stretch to whenever the next panorama happened to come along.
+const SLICE_RETENTION_DAYS = 7;
 const RAW_HOST = "https://raw.githubusercontent.com";
 const IG_CAPTION_MAX = 2200; // Instagram hard limit
 const EXPLANATION_BUDGET = 1800; // leaves room for title, date, hashtags, credit
@@ -802,15 +806,18 @@ async function pruneOldSlices(keepDate) {
   try {
     entries = await readdir(SLICE_DIR, { withFileTypes: true });
   } catch {
-    return;
+    return [];
   }
   const cutoff = Date.now() - SLICE_RETENTION_DAYS * 86400000;
+  const removed = [];
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name === keepDate) continue;
     const stamp = Date.parse(`${entry.name}T00:00:00Z`);
     if (Number.isNaN(stamp) || stamp >= cutoff) continue;
     await rm(join(SLICE_DIR, entry.name), { recursive: true, force: true });
+    removed.push(entry.name);
   }
+  return removed;
 }
 
 // Instagram fetches carousel children over the public internet, so the
@@ -826,7 +833,6 @@ async function hostSlices(sliced, apodDate) {
     );
   }
 
-  await pruneOldSlices(apodDate);
   await git("add", "-A", SLICE_DIR);
 
   const staged = await git("diff", "--cached", "--name-only");
@@ -1037,6 +1043,16 @@ async function run(record) {
   if (FORCE) {
     console.log("⚠️  FORCE=true — idempotency guards bypassed for this run.");
     record.forced = true;
+  }
+
+  // Runs before the guards so expired slices are cleared even on days that
+  // publish nothing — an already_posted run still tidies up.
+  const removed = await pruneOldSlices(new Date().toISOString().slice(0, 10));
+  if (removed.length) {
+    console.log(
+      `🧹 Pruned ${removed.length} slice set(s) older than ${SLICE_RETENTION_DAYS} days: ${removed.join(", ")}`
+    );
+    record.pruned_slices = removed;
   }
 
   if (!DRY_RUN && !FORCE) {

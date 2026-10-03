@@ -129,8 +129,12 @@ jobs:
       - name: Commit log entry
         if: always()
         run: |
-          if [[ -z "$(git status --porcelain logs/ 2>/dev/null)" ]]; then
-            echo "No log changes to commit."
+          # Also picks up slice directories the script pruned. On carousel
+          # days the script already committed the new slices itself; this
+          # catches the expiries on every other day, which is what keeps the
+          # retention window honest.
+          if [[ -z "$(git status --porcelain logs/ slices/ 2>/dev/null)" ]]; then
+            echo "No log or slice changes to commit."
             exit 0
           fi
           git config user.name "github-actions[bot]"
@@ -138,6 +142,7 @@ jobs:
           # Pull-rebase in case another commit landed on the branch between
           # checkout and now — unlikely for a once-a-day job but cheap insurance.
           git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
-          git add logs/
+          # -A so pruned slice directories are staged as deletions, not skipped.
+          git add -A logs/ slices/
           git commit -m "log: APOD run $(date -u +%Y-%m-%d) [${{ github.event_name }}]"
           git push origin "HEAD:${GITHUB_REF_NAME}"
