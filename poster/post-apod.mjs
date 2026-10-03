@@ -8,6 +8,12 @@
 //      fails instead of publishing. See fetchAPOD() for why that matters.
 //   2. Dispatches on media type:
 //       - image        → posts to feed as an image (single container + publish)
+//       - wide / tall  → images outside Instagram's 0.8–1.91 aspect window are
+//                        sliced into a swipeable carousel rather than cropped
+//                        or rejected. Panoramas cut left→right, tall mosaics
+//                        top→bottom. The slices are committed to slices/ and
+//                        served to IG from raw.githubusercontent.com, so this
+//                        path needs GitHub Actions. See planSlices().
 //       - direct video → posts as a Reel with share_to_feed=true; needs a
 //                        polling step because IG processes video async
 //       - embed video  → skipped (IG cannot fetch YouTube/Vimeo URLs)
@@ -36,9 +42,14 @@
 // Runs on GitHub Actions cron once per day. Can also be invoked manually
 // via the "Run workflow" button (workflow_dispatch) for test posts.
 
-import { mkdir, appendFile, readFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdir, appendFile, readFile, readdir, rm } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import Anthropic from "@anthropic-ai/sdk";
+import { Jimp } from "jimp";
+
+const execFileAsync = promisify(execFile);
 
 const GRAPH_API_VERSION = "v21.0";
 const NASA_APOD_URL = "https://api.nasa.gov/planetary/apod";
@@ -55,6 +66,21 @@ const APOD_FEED_URL = "https://science.nasa.gov/feed/apod-basic/";
 // Instagram's accepted aspect-ratio window for feed images (w/h).
 const IG_MIN_ASPECT = 0.8; // 4:5 portrait
 const IG_MAX_ASPECT = 1.91; // 1.91:1 landscape
+
+// Photos outside that window are split across a swipeable carousel instead
+// of being cropped or rejected. Wide panoramas cut along x (swipe = pan
+// left→right); tall mosaics cut along y (swipe = scroll top→bottom).
+//
+// The epsilon keeps images that sit a hair outside the limit — a 4455x5592
+// APOD is 0.797 — as single posts, since a two-page carousel for a 0.4%
+// overshoot is worse than just posting the photo.
+const ASPECT_EPSILON = 0.02;
+const MAX_CAROUSEL_ITEMS = 10; // Instagram's per-carousel limit
+const SLICE_LONG_EDGE = 1440; // IG downscales beyond this anyway
+const SLICE_SOURCE_CAP = 2880; // fetch a scaled source, not the 92 MP original
+const SLICE_DIR = "slices";
+const SLICE_RETENTION_DAYS = 30; // prune older slice sets so the repo stays small
+const RAW_HOST = "https://raw.githubusercontent.com";
 const IG_CAPTION_MAX = 2200; // Instagram hard limit
 const EXPLANATION_BUDGET = 1800; // leaves room for title, date, hashtags, credit
 
@@ -619,6 +645,209 @@ function buildCaption({ title, explanation, date, copyright }, hashtagTokens) {
   return caption;
 }
 
+// ── Panorama / tall-mosaic slicing ──────────────────────────────────────
+//
+// Instagram only accepts 0.8–1.91 aspect. NASA's asset host ignores every
+// crop-offset parameter (rect, crop=x,y,w,h, cx/cy/cw/ch) — it only ever
+// scales to native aspect — so slicing has to happen here, and the pieces
+// have to be hosted somewhere Instagram can fetch them. They are committed
+// to this public repo and served from raw.githubusercontent.com.
+
+// Choose the cut axis and slice count so every piece lands inside the
+// accepted window, aiming for roughly square slices. Returns null when the
+// photo is already postable as-is.
+function planSlices(width, height) {
+  const aspect = width / height;
+  let axis;
+  let count;
+  if (aspect > IG_MAX_ASPECT + ASPECT_EPSILON) {
+    axis = "x";
+    count = Math.round(aspect);
+  } else if (aspect < IG_MIN_ASPECT - ASPECT_EPSILON) {
+    axis = "y";
+    count = Math.round(1 / aspect);
+  } else {
+    return null;
+  }
+  count = Math.min(MAX_CAROUSEL_ITEMS, Math.max(2, count));
+
+  let sliceWidth = axis === "x" ? Math.floor(width / count) : width;
+  let sliceHeight = axis === "y" ? Math.floor(height / count) : height;
+
+  // Beyond ~19:1 even ten slices stay too wide, so trim each piece to the
+  // limit. That leaves small gaps between pages — unavoidable, and still
+  // better than failing to post at all.
+  let gapped = false;
+  if (sliceWidth / sliceHeight > IG_MAX_ASPECT) {
+    sliceWidth = Math.floor(sliceHeight * IG_MAX_ASPECT);
+    gapped = true;
+  }
+  if (sliceWidth / sliceHeight < IG_MIN_ASPECT) {
+    sliceHeight = Math.floor(sliceWidth / IG_MIN_ASPECT);
+    gapped = true;
+  }
+
+  // Centre the covered span so any remainder is split between both ends
+  // rather than all falling off one edge.
+  const spanWidth = axis === "x" ? sliceWidth * count : sliceWidth;
+  const spanHeight = axis === "y" ? sliceHeight * count : sliceHeight;
+  const originX = Math.floor((width - spanWidth) / 2);
+  const originY = Math.floor((height - spanHeight) / 2);
+
+  const regions = Array.from({ length: count }, (_, i) => ({
+    index: i + 1,
+    left: axis === "x" ? originX + i * sliceWidth : originX,
+    top: axis === "y" ? originY + i * sliceHeight : originY,
+    width: sliceWidth,
+    height: sliceHeight,
+  }));
+
+  return {
+    axis,
+    count,
+    gapped,
+    aspect: Number(aspect.toFixed(3)),
+    sliceAspect: Number((sliceWidth / sliceHeight).toFixed(3)),
+    regions,
+  };
+}
+
+// Ask the asset host for a scaled copy rather than the full original — the
+// Carina mosaic is 8200x11220, which is 92 MP of decoded bitmap for an image
+// Instagram will show at 1440px.
+function scaledSourceUrl(url, cap = SLICE_SOURCE_CAP) {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.searchParams.has("w") && !parsed.searchParams.has("h")) {
+      return url;
+    }
+    parsed.searchParams.set("w", String(cap));
+    parsed.searchParams.set("h", String(cap));
+    parsed.searchParams.set("fit", "clip");
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+async function sliceImage(sourceUrl, apodDate) {
+  const image = await Jimp.read(scaledSourceUrl(sourceUrl));
+  const { width, height } = image.bitmap;
+  const plan = planSlices(width, height);
+  if (!plan) return null;
+
+  const dir = join(SLICE_DIR, apodDate);
+  await mkdir(dir, { recursive: true });
+
+  const files = [];
+  for (const region of plan.regions) {
+    const slice = image.clone().crop({
+      x: region.left,
+      y: region.top,
+      w: region.width,
+      h: region.height,
+    });
+    // Resize on the long edge only; Jimp keeps the aspect ratio for the other.
+    if (Math.max(region.width, region.height) > SLICE_LONG_EDGE) {
+      slice.resize(
+        region.width >= region.height
+          ? { w: SLICE_LONG_EDGE }
+          : { h: SLICE_LONG_EDGE }
+      );
+    }
+    const file = join(dir, `${String(region.index).padStart(2, "0")}.jpg`);
+    await slice.write(file, { quality: 90 });
+    files.push(file);
+  }
+
+  return { ...plan, dir, files, sourceWidth: width, sourceHeight: height };
+}
+
+async function git(...args) {
+  const { stdout } = await execFileAsync("git", args);
+  return stdout.trim();
+}
+
+// Drop slice sets we no longer need. Instagram keeps its own copy once a
+// post is published, so these only have to survive the publish call.
+async function pruneOldSlices(keepDate) {
+  let entries;
+  try {
+    entries = await readdir(SLICE_DIR, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const cutoff = Date.now() - SLICE_RETENTION_DAYS * 86400000;
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === keepDate) continue;
+    const stamp = Date.parse(`${entry.name}T00:00:00Z`);
+    if (Number.isNaN(stamp) || stamp >= cutoff) continue;
+    await rm(join(SLICE_DIR, entry.name), { recursive: true, force: true });
+  }
+}
+
+// Instagram fetches carousel children over the public internet, so the
+// slices must be pushed before any container is created. Returns the public
+// URLs, in order.
+async function hostSlices(sliced, apodDate) {
+  const repo = process.env.GITHUB_REPOSITORY;
+  const branch = process.env.GITHUB_REF_NAME;
+  if (!repo || !branch) {
+    throw new Error(
+      "Carousel hosting needs GITHUB_REPOSITORY and GITHUB_REF_NAME " +
+        "(set by GitHub Actions) to build raw.githubusercontent.com URLs"
+    );
+  }
+
+  await pruneOldSlices(apodDate);
+  await git("add", "-A", SLICE_DIR);
+
+  const staged = await git("diff", "--cached", "--name-only");
+  if (staged) {
+    await git(
+      "-c",
+      "user.name=github-actions[bot]",
+      "-c",
+      "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+      "commit",
+      "-m",
+      `slices: APOD ${apodDate} carousel (${sliced.count} pieces)`
+    );
+    try {
+      await git("push", "origin", `HEAD:${branch}`);
+    } catch {
+      // The branch moved under us (a previous run's log commit). Rebase and
+      // retry once rather than losing the slices.
+      await git("pull", "--rebase", "--autostash", "origin", branch);
+      await git("push", "origin", `HEAD:${branch}`);
+    }
+  }
+
+  const sha = await git("rev-parse", "HEAD");
+  return sliced.files.map(
+    (file) => `${RAW_HOST}/${repo}/${sha}/${file.split("/").map(encodeURIComponent).join("/")}`
+  );
+}
+
+async function createCarouselChild(imageUrl) {
+  const endpoint = `https://graph.facebook.com/${GRAPH_API_VERSION}/${IG_BUSINESS_ACCOUNT_ID}/media`;
+  const data = await postForm(endpoint, {
+    image_url: imageUrl,
+    is_carousel_item: "true",
+  });
+  return data.id;
+}
+
+async function createCarouselContainer(childIds, caption) {
+  const endpoint = `https://graph.facebook.com/${GRAPH_API_VERSION}/${IG_BUSINESS_ACCOUNT_ID}/media`;
+  const data = await postForm(endpoint, {
+    media_type: "CAROUSEL",
+    children: childIds.join(","),
+    caption,
+  });
+  return data.id;
+}
+
 async function postForm(endpoint, params) {
   const body = new URLSearchParams({
     ...params,
@@ -848,30 +1077,55 @@ async function run(record) {
   console.log(`  Media URL:  ${mediaUrl}`);
   console.log(`  Source:     ${apod.source}`);
 
-  // Warn when the photo falls outside Instagram's accepted window. APOD
-  // panoramas (today's Curiosity selfie is a true 2:1) and very tall mosaics
-  // do. The asset host always serves native aspect — it ignores crop/pad
-  // params — so there is nothing to correct here; we post it and let the log
-  // explain any IG-side rejection instead of leaving it a mystery.
+  // Photos outside Instagram's accepted window go out as a swipeable
+  // carousel instead of being cropped or rejected.
   const dims = dimsFromUrl(mediaUrl);
   if (dims) {
-    const aspect = Number((dims.width / dims.height).toFixed(3));
-    record.aspect_ratio = aspect;
+    record.aspect_ratio = Number((dims.width / dims.height).toFixed(3));
     record.dimensions = `${dims.width}x${dims.height}`;
-    if (aspect > IG_MAX_ASPECT || aspect < IG_MIN_ASPECT) {
-      console.log(
-        `  ⚠️  Aspect ratio ${aspect} (${dims.width}x${dims.height}) is outside ` +
-          `Instagram's ${IG_MIN_ASPECT}–${IG_MAX_ASPECT} window; IG may reject it.`
-      );
-      record.aspect_out_of_range = true;
-    }
   }
 
-  // Verify the bytes are real media before Instagram is asked to fetch them.
-  const contentType = await retryWithBackoff("media preflight", () =>
-    assertMediaFetchable(mediaUrl, mediaKind)
-  );
-  console.log(`  Content-Type: ${contentType}`);
+  let sliced = null;
+  const needsSlicing =
+    mediaKind === "image" &&
+    dims &&
+    (dims.width / dims.height > IG_MAX_ASPECT + ASPECT_EPSILON ||
+      dims.width / dims.height < IG_MIN_ASPECT - ASPECT_EPSILON);
+
+  if (needsSlicing) {
+    console.log(
+      `→ Aspect ${record.aspect_ratio} is outside Instagram's ` +
+        `${IG_MIN_ASPECT}–${IG_MAX_ASPECT} window — slicing into a carousel…`
+    );
+    sliced = await retryWithBackoff("panorama slice", () =>
+      sliceImage(mediaUrl, apod.date)
+    );
+  }
+
+  if (sliced) {
+    const direction = sliced.axis === "x" ? "left→right" : "top→bottom";
+    console.log(
+      `  ${sliced.count} slices on ${sliced.axis} (${direction}), ` +
+        `each ${sliced.sliceAspect} — from ${sliced.sourceWidth}x${sliced.sourceHeight}`
+    );
+    if (sliced.gapped) {
+      console.log(
+        "  ⚠️  Too wide for 10 slices — pieces were trimmed, so small gaps fall between pages."
+      );
+    }
+    record.media_kind = "carousel";
+    record.carousel_count = sliced.count;
+    record.slice_axis = sliced.axis;
+    record.slice_aspect = sliced.sliceAspect;
+    if (sliced.gapped) record.slice_gapped = true;
+  } else {
+    // Single image or video: verify the bytes are real media before
+    // Instagram is asked to fetch them.
+    const contentType = await retryWithBackoff("media preflight", () =>
+      assertMediaFetchable(mediaUrl, mediaKind)
+    );
+    console.log(`  Content-Type: ${contentType}`);
+  }
 
   console.log("→ Generating hashtags…");
   const hashtags = await generateHashtags(apod);
@@ -884,7 +1138,9 @@ async function run(record) {
 
   if (DRY_RUN) {
     console.log(
-      `🧪 DRY_RUN=true — would post as ${mediaKind}, skipping Instagram publish.`
+      `🧪 DRY_RUN=true — would post as ${
+        sliced ? `a ${sliced.count}-slice carousel` : mediaKind
+      }, skipping Instagram publish.`
     );
     console.log("─── Caption preview ───────────────────────");
     console.log(caption);
@@ -895,7 +1151,39 @@ async function run(record) {
   }
 
   let containerId;
-  if (mediaKind === "image") {
+  if (sliced) {
+    console.log("→ Publishing slices so Instagram can fetch them…");
+    const sliceUrls = await hostSlices(sliced, apod.date);
+    record.slice_urls = sliceUrls;
+
+    // raw.githubusercontent.com serves the commit SHA immediately, but
+    // confirm before handing the URLs to Instagram — a 404 here would come
+    // back as an opaque Graph API error.
+    for (const url of sliceUrls) {
+      await retryWithBackoff("slice preflight", () =>
+        assertMediaFetchable(url, "image")
+      );
+    }
+    console.log(`  ${sliceUrls.length} slices reachable.`);
+
+    console.log("→ Creating carousel children…");
+    const childIds = [];
+    for (const url of sliceUrls) {
+      const childId = await retryWithBackoff("IG carousel child create", () =>
+        createCarouselChild(url)
+      );
+      childIds.push(childId);
+    }
+    record.child_ids = childIds;
+
+    console.log("→ Creating carousel container…");
+    containerId = await retryWithBackoff("IG carousel container create", () =>
+      createCarouselContainer(childIds, caption)
+    );
+    console.log(`  Container ID: ${containerId}`);
+    record.container_id = containerId;
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  } else if (mediaKind === "image") {
     console.log("→ Creating IG image container…");
     containerId = await retryWithBackoff("IG image container create", () =>
       createImageContainer(mediaUrl, caption)
