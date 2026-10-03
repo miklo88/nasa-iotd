@@ -79,6 +79,12 @@ const MAX_CAROUSEL_ITEMS = 10; // Instagram's per-carousel limit
 const SLICE_LONG_EDGE = 1440; // IG downscales beyond this anyway
 const SLICE_SOURCE_CAP = 2880; // fetch a scaled source, not the 92 MP original
 const SLICE_DIR = "slices";
+// Instagram documents JPEG-only feed images with an 8 MB ceiling. APOD
+// publishes PNGs (two in the last 30 days) and they can be enormous — the
+// Sharpless catalog is a 36 MB PNG, still 10.8 MB even scaled to 2880px.
+// Anything that is not a modest JPEG gets re-encoded through the same
+// pipeline as the slices. That 36 MB PNG lands at ~550 KB.
+const IG_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const SLICE_RETENTION_DAYS = 30; // prune older slice sets so the repo stays small
 const RAW_HOST = "https://raw.githubusercontent.com";
 const IG_CAPTION_MAX = 2200; // Instagram hard limit
@@ -389,7 +395,8 @@ async function assertMediaFetchable(url, mediaKind) {
         `refusing to publish (url=${url})`
     );
   }
-  return type;
+  const length = Number(res.headers.get("content-length"));
+  return { type, bytes: Number.isFinite(length) && length > 0 ? length : null };
 }
 
 // ── Hashtag generation ──────────────────────────────────────────────────
@@ -730,11 +737,26 @@ function scaledSourceUrl(url, cap = SLICE_SOURCE_CAP) {
   }
 }
 
-async function sliceImage(sourceUrl, apodDate) {
+// Produces the JPEG files Instagram will actually be given. Normally that is
+// a slice set; with `reencodeOnly` it is a single full-frame copy, which is
+// how PNG and oversized sources are normalised (everything written here is
+// JPEG, capped at SLICE_LONG_EDGE).
+async function sliceImage(sourceUrl, apodDate, { reencodeOnly = false } = {}) {
   const image = await Jimp.read(scaledSourceUrl(sourceUrl));
   const { width, height } = image.bitmap;
-  const plan = planSlices(width, height);
-  if (!plan) return null;
+  let plan = planSlices(width, height);
+  if (!plan) {
+    if (!reencodeOnly) return null;
+    const aspect = Number((width / height).toFixed(3));
+    plan = {
+      axis: null,
+      count: 1,
+      gapped: false,
+      aspect,
+      sliceAspect: aspect,
+      regions: [{ index: 1, left: 0, top: 0, width, height }],
+    };
+  }
 
   const dir = join(SLICE_DIR, apodDate);
   await mkdir(dir, { recursive: true });
@@ -1085,24 +1107,52 @@ async function run(record) {
     record.dimensions = `${dims.width}x${dims.height}`;
   }
 
-  let sliced = null;
-  const needsSlicing =
-    mediaKind === "image" &&
-    dims &&
-    (dims.width / dims.height > IG_MAX_ASPECT + ASPECT_EPSILON ||
-      dims.width / dims.height < IG_MIN_ASPECT - ASPECT_EPSILON);
+  // Confirm the bytes are real media, and learn the format and weight before
+  // deciding how to publish.
+  const probe = await retryWithBackoff("media preflight", () =>
+    assertMediaFetchable(mediaUrl, mediaKind)
+  );
+  console.log(
+    `  Content-Type: ${probe.type}${
+      probe.bytes ? ` (${(probe.bytes / 1048576).toFixed(1)} MB)` : ""
+    }`
+  );
+  record.source_content_type = probe.type;
+  if (probe.bytes) record.source_bytes = probe.bytes;
 
-  if (needsSlicing) {
-    console.log(
-      `→ Aspect ${record.aspect_ratio} is outside Instagram's ` +
-        `${IG_MIN_ASPECT}–${IG_MAX_ASPECT} window — slicing into a carousel…`
-    );
-    sliced = await retryWithBackoff("panorama slice", () =>
-      sliceImage(mediaUrl, apod.date)
-    );
+  let sliced = null;
+  if (mediaKind === "image") {
+    const aspect = dims ? dims.width / dims.height : null;
+    const needsSlicing =
+      aspect !== null &&
+      (aspect > IG_MAX_ASPECT + ASPECT_EPSILON ||
+        aspect < IG_MIN_ASPECT - ASPECT_EPSILON);
+    // Instagram takes JPEG only, up to 8 MB. APOD also publishes PNGs.
+    const notJpeg = !/^image\/jpe?g/.test(probe.type);
+    const tooBig = probe.bytes != null && probe.bytes > IG_MAX_IMAGE_BYTES;
+
+    if (needsSlicing) {
+      console.log(
+        `→ Aspect ${record.aspect_ratio} is outside Instagram's ` +
+          `${IG_MIN_ASPECT}–${IG_MAX_ASPECT} window — slicing into a carousel…`
+      );
+    } else if (notJpeg || tooBig) {
+      console.log(
+        `→ Re-encoding to JPEG — ${
+          notJpeg ? `source is ${probe.type}` : "source exceeds 8 MB"
+        }…`
+      );
+      record.reencoded = true;
+    }
+
+    if (needsSlicing || notJpeg || tooBig) {
+      sliced = await retryWithBackoff("image prepare", () =>
+        sliceImage(mediaUrl, apod.date, { reencodeOnly: !needsSlicing })
+      );
+    }
   }
 
-  if (sliced) {
+  if (sliced && sliced.count > 1) {
     const direction = sliced.axis === "x" ? "left→right" : "top→bottom";
     console.log(
       `  ${sliced.count} slices on ${sliced.axis} (${direction}), ` +
@@ -1118,13 +1168,10 @@ async function run(record) {
     record.slice_axis = sliced.axis;
     record.slice_aspect = sliced.sliceAspect;
     if (sliced.gapped) record.slice_gapped = true;
-  } else {
-    // Single image or video: verify the bytes are real media before
-    // Instagram is asked to fetch them.
-    const contentType = await retryWithBackoff("media preflight", () =>
-      assertMediaFetchable(mediaUrl, mediaKind)
+  } else if (sliced) {
+    console.log(
+      `  Re-encoded to JPEG from ${sliced.sourceWidth}x${sliced.sourceHeight}.`
     );
-    console.log(`  Content-Type: ${contentType}`);
   }
 
   console.log("→ Generating hashtags…");
@@ -1139,7 +1186,11 @@ async function run(record) {
   if (DRY_RUN) {
     console.log(
       `🧪 DRY_RUN=true — would post as ${
-        sliced ? `a ${sliced.count}-slice carousel` : mediaKind
+        sliced
+          ? sliced.count > 1
+            ? `a ${sliced.count}-slice carousel`
+            : "a re-encoded JPEG image"
+          : mediaKind
       }, skipping Instagram publish.`
     );
     console.log("─── Caption preview ───────────────────────");
@@ -1151,9 +1202,10 @@ async function run(record) {
   }
 
   let containerId;
+  let sliceUrls = [];
   if (sliced) {
-    console.log("→ Publishing slices so Instagram can fetch them…");
-    const sliceUrls = await hostSlices(sliced, apod.date);
+    console.log("→ Publishing prepared image(s) so Instagram can fetch them…");
+    sliceUrls = await hostSlices(sliced, apod.date);
     record.slice_urls = sliceUrls;
 
     // raw.githubusercontent.com serves the commit SHA immediately, but
@@ -1164,8 +1216,20 @@ async function run(record) {
         assertMediaFetchable(url, "image")
       );
     }
-    console.log(`  ${sliceUrls.length} slices reachable.`);
+    console.log(`  ${sliceUrls.length} file(s) reachable.`);
+  }
 
+  if (sliced && sliced.count === 1) {
+    // A re-encoded single frame: an ordinary image post, just served from
+    // our copy instead of NASA's.
+    console.log("→ Creating IG image container (re-encoded source)…");
+    containerId = await retryWithBackoff("IG image container create", () =>
+      createImageContainer(sliceUrls[0], caption)
+    );
+    console.log(`  Container ID: ${containerId}`);
+    record.container_id = containerId;
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  } else if (sliced) {
     console.log("→ Creating carousel children…");
     const childIds = [];
     for (const url of sliceUrls) {
