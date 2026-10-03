@@ -2,7 +2,10 @@
 // Daily APOD → Instagram poster.
 //
 // What this does:
-//   1. Fetches NASA's Astronomy Picture of the Day.
+//   1. Fetches NASA's Astronomy Picture of the Day — from the science.nasa.gov
+//      APOD feed, falling back to api.nasa.gov/planetary/apod. Every candidate
+//      must name a real /apod/ asset and serve image|video bytes, or the run
+//      fails instead of publishing. See fetchAPOD() for why that matters.
 //   2. Dispatches on media type:
 //       - image        → posts to feed as an image (single container + publish)
 //       - direct video → posts as a Reel with share_to_feed=true; needs a
@@ -17,7 +20,8 @@
 // Required environment variables:
 //   META_ACCESS_TOKEN        — long-lived system-user token from Meta Business Portfolio
 //   IG_BUSINESS_ACCOUNT_ID   — the Instagram Business Account ID (e.g. 17841416854670812)
-//   NASA_API_KEY             — NASA APOD API key (DEMO_KEY works but is heavily rate-limited)
+//   NASA_API_KEY             — NASA APOD API key, used only by the fallback
+//                              source (DEMO_KEY works but is heavily rate-limited)
 //
 // Optional:
 //   DRY_RUN=true             — Fetch APOD and build the caption, but skip the
@@ -38,6 +42,19 @@ import Anthropic from "@anthropic-ai/sdk";
 
 const GRAPH_API_VERSION = "v21.0";
 const NASA_APOD_URL = "https://api.nasa.gov/planetary/apod";
+
+// Primary metadata source. In late Sept 2026 NASA migrated APOD off
+// apod.nasa.gov to science.nasa.gov; api.nasa.gov/planetary/apod scrapes the
+// old page, so it now follows the redirect and returns the *site chrome*
+// instead of the photo — title "NASA Science" and url/hdurl pointing at
+// nasa-logo@2x.png. The explanation field still comes through correctly,
+// which is why this failed silently: every run reported status "ok" while
+// publishing the NASA logo. This feed is the migrated, structured source.
+const APOD_FEED_URL = "https://science.nasa.gov/feed/apod-basic/";
+
+// Instagram's accepted aspect-ratio window for feed images (w/h).
+const IG_MIN_ASPECT = 0.8; // 4:5 portrait
+const IG_MAX_ASPECT = 1.91; // 1.91:1 landscape
 const IG_CAPTION_MAX = 2200; // Instagram hard limit
 const EXPLANATION_BUDGET = 1800; // leaves room for title, date, hashtags, credit
 
@@ -89,6 +106,13 @@ function isRetryable(err) {
   const apodMatch = err.message?.match(/APOD fetch failed: (\d+)/);
   if (apodMatch) return isRetryableStatus(Number(apodMatch[1]));
 
+  // assertMediaFetchable: "Media URL not fetchable: 503 Service Unavailable".
+  // A wrong content-type is deliberately absent here — that means the asset
+  // host is serving something that is not media, which retrying cannot fix.
+  const mediaMatch = err.message?.match(/Media URL not fetchable: (\d+)/);
+  if (mediaMatch) return isRetryableStatus(Number(mediaMatch[1]));
+  if (/^Media URL unreachable:/.test(err.message || "")) return true;
+
   // Native fetch TypeError ("fetch failed", ECONNRESET, ENOTFOUND, etc.)
   // These have a `cause` with a system error code. Always transient.
   if (err.cause || err.code === "ECONNRESET" || err.code === "ETIMEDOUT") {
@@ -133,13 +157,213 @@ async function retryWithBackoff(label, fn) {
   throw lastErr;
 }
 
-async function fetchAPOD() {
+// ── APOD metadata sources ───────────────────────────────────────────────
+
+function decodeEntities(s = "") {
+  return s
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&#0?38;|&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;|&apos;|&#8217;|&rsquo;/g, "'")
+    .replace(/&#8211;|&ndash;/g, "–")
+    .replace(/&nbsp;/g, " ");
+}
+
+function stripHtml(s = "") {
+  return decodeEntities(s).replace(/<[^>]*>/g, "");
+}
+
+function tidy(s = "") {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+// APOD explanations end with site boilerplate ("Tomorrow's picture: …",
+// submission notices). It is not part of the photo's description and only
+// eats into the caption budget, so cut it off at the first marker.
+const EXPLANATION_CUTOFFS = [
+  /APOD'?s email for image submissions/i,
+  /Tomorrow'?s picture/i,
+  /digg_url|APOD Submissions/i,
+];
+
+function cleanExplanation(raw) {
+  let text = tidy(stripHtml(raw).replace(/^\s*Explanation:\s*/i, ""));
+  for (const marker of EXPLANATION_CUTOFFS) {
+    const m = text.match(marker);
+    if (m) text = text.slice(0, m.index).trim();
+  }
+  return text.replace(/[\s.]+$/, (t) => (t.includes(".") ? "." : ""));
+}
+
+// The feed's credit field is prefixed with its own "Image Credit:" label,
+// which buildCaption adds again — strip it to avoid doubling.
+function cleanCredit(raw) {
+  const text = tidy(stripHtml(raw));
+  if (!text) return "";
+  return text
+    .replace(/^\s*(Image\s+)?Credit\s*(&|and)?\s*(Copyright)?\s*:?\s*/i, "")
+    .trim();
+}
+
+function tagText(xml, tag) {
+  const m = xml.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "i"));
+  return m ? m[1] : "";
+}
+
+// The feed's hdurl carries the asset's native dimensions in its query
+// string (?w=1600&h=800&fit=clip), so we learn the aspect ratio without
+// downloading the image.
+function dimsFromUrl(url) {
+  try {
+    const q = new URL(url).searchParams;
+    const w = Number(q.get("w"));
+    const h = Number(q.get("h"));
+    if (w > 0 && h > 0) return { width: w, height: h };
+  } catch {}
+  return null;
+}
+
+async function fetchApodFromFeed() {
+  const res = await fetch(APOD_FEED_URL, {
+    headers: { accept: "application/rss+xml, application/xml, text/xml" },
+  });
+  if (!res.ok) {
+    throw new Error(`APOD fetch failed: ${res.status} ${res.statusText}`);
+  }
+  const xml = await res.text();
+  const item = xml.match(/<item>[\s\S]*?<\/item>/i)?.[0];
+  if (!item) throw new Error("APOD feed contained no <item> entries");
+
+  const hdurl = decodeEntities(tagText(item, "apod:hdurl")).trim();
+  const pubDate = tagText(item, "pubDate").trim();
+  const date = pubDate
+    ? new Date(pubDate).toISOString().slice(0, 10)
+    : new Date().toISOString().slice(0, 10);
+
+  return {
+    date,
+    title: tidy(stripHtml(tagText(item, "title"))),
+    explanation: cleanExplanation(tagText(item, "apod:explanation")),
+    url: hdurl,
+    hdurl,
+    // On video days the feed points at a file rather than a still, so keep
+    // the Reels path reachable instead of mislabelling it an image.
+    media_type: isDirectVideoFile(hdurl) ? "video" : "image",
+    copyright: cleanCredit(tagText(item, "apod:copyright")),
+    permalink: tidy(stripHtml(tagText(item, "link"))),
+    source: "feed",
+  };
+}
+
+async function fetchApodFromApi() {
   const url = `${NASA_APOD_URL}?api_key=${encodeURIComponent(NASA_API_KEY)}`;
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`APOD fetch failed: ${res.status} ${res.statusText}`);
   }
-  return res.json();
+  const data = await res.json();
+  return {
+    ...data,
+    explanation: cleanExplanation(data.explanation || ""),
+    copyright: cleanCredit(data.copyright || ""),
+    source: "api",
+  };
+}
+
+// Every genuine APOD asset lives under an /apod/ path segment, on either the
+// new science.nasa.gov asset host or the legacy apod.nasa.gov one. The site
+// chrome that api.nasa.gov now returns (…/themes/nasa-child/assets/images/
+// nasa-logo@2x.png) does not, so this one check is what stops the logo from
+// being published.
+function looksLikeApodAsset(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (!/^https?:$/.test(parsed.protocol)) return false;
+  if (!/(^|\.)nasa\.gov$/i.test(parsed.hostname)) return false;
+  if (!/\/apod\//i.test(parsed.pathname)) return false;
+  if (/nasa-logo|\/themes\//i.test(parsed.pathname)) return false;
+  return true;
+}
+
+function validateApod(apod, label) {
+  const problems = [];
+  if (!apod?.url) problems.push("no media url");
+  else if (!looksLikeApodAsset(apod.url))
+    problems.push(`url is not an APOD asset (${apod.url})`);
+  if (!apod?.title) problems.push("no title");
+  else if (/^NASA Science$/i.test(apod.title.trim()))
+    problems.push(`placeholder title "${apod.title}"`);
+  if (!apod?.explanation) problems.push("no explanation");
+
+  if (problems.length) {
+    console.log(`  ⚠️  ${label} source unusable: ${problems.join("; ")}`);
+    return false;
+  }
+  return true;
+}
+
+// Try the migrated feed first, fall back to the legacy API, and refuse to
+// continue if neither yields a real photo. Posting nothing is recoverable;
+// posting the wrong image to the feed every day is not.
+async function fetchAPOD() {
+  const sources = [
+    ["feed", fetchApodFromFeed],
+    ["api.nasa.gov", fetchApodFromApi],
+  ];
+
+  const failures = [];
+  for (const [label, fn] of sources) {
+    let apod;
+    try {
+      apod = await fn();
+    } catch (err) {
+      console.log(`  ⚠️  ${label} source errored: ${err.message || err}`);
+      failures.push(`${label}: ${err.message || err}`);
+      continue;
+    }
+    if (validateApod(apod, label)) {
+      if (label !== "feed") {
+        console.log(`  ℹ️  Using fallback source: ${label}`);
+      }
+      return apod;
+    }
+    failures.push(`${label}: returned no usable APOD asset`);
+  }
+
+  throw new Error(
+    `No usable APOD found from any source — ${failures.join(" | ")}`
+  );
+}
+
+// Last line of defence before handing a URL to Instagram. Since the
+// migration, any path under apod.nasa.gov answers 200 with the new landing
+// page's HTML, so a status check alone is not enough — IG would be told to
+// ingest a 265 KB HTML document. Confirm the bytes are actually media.
+async function assertMediaFetchable(url, mediaKind) {
+  let res;
+  try {
+    res = await fetch(url, { method: "HEAD", redirect: "follow" });
+  } catch (err) {
+    throw new Error(`Media URL unreachable: ${err.message || err}`);
+  }
+  if (!res.ok) {
+    throw new Error(`Media URL not fetchable: ${res.status} ${res.statusText}`);
+  }
+  const type = (res.headers.get("content-type") || "").toLowerCase();
+  const expected = mediaKind === "video" ? "video/" : "image/";
+  if (!type.startsWith(expected)) {
+    throw new Error(
+      `Media URL returned content-type "${type || "unknown"}", expected ${expected}* — ` +
+        `refusing to publish (url=${url})`
+    );
+  }
+  return type;
 }
 
 // ── Hashtag generation ──────────────────────────────────────────────────
@@ -578,6 +802,7 @@ async function run(record) {
   record.apod_title = apod.title;
   record.apod_media_type = apod.media_type;
   record.apod_url = apod.url;
+  record.apod_source = apod.source;
 
   // Idempotency guard #2 — same photo, never twice. If this exact APOD
   // (by its date) was already posted OK, stop here and wait for tomorrow's
@@ -621,6 +846,32 @@ async function run(record) {
 
   const mediaUrl = apod.url;
   console.log(`  Media URL:  ${mediaUrl}`);
+  console.log(`  Source:     ${apod.source}`);
+
+  // Warn when the photo falls outside Instagram's accepted window. APOD
+  // panoramas (today's Curiosity selfie is a true 2:1) and very tall mosaics
+  // do. The asset host always serves native aspect — it ignores crop/pad
+  // params — so there is nothing to correct here; we post it and let the log
+  // explain any IG-side rejection instead of leaving it a mystery.
+  const dims = dimsFromUrl(mediaUrl);
+  if (dims) {
+    const aspect = Number((dims.width / dims.height).toFixed(3));
+    record.aspect_ratio = aspect;
+    record.dimensions = `${dims.width}x${dims.height}`;
+    if (aspect > IG_MAX_ASPECT || aspect < IG_MIN_ASPECT) {
+      console.log(
+        `  ⚠️  Aspect ratio ${aspect} (${dims.width}x${dims.height}) is outside ` +
+          `Instagram's ${IG_MIN_ASPECT}–${IG_MAX_ASPECT} window; IG may reject it.`
+      );
+      record.aspect_out_of_range = true;
+    }
+  }
+
+  // Verify the bytes are real media before Instagram is asked to fetch them.
+  const contentType = await retryWithBackoff("media preflight", () =>
+    assertMediaFetchable(mediaUrl, mediaKind)
+  );
+  console.log(`  Content-Type: ${contentType}`);
 
   console.log("→ Generating hashtags…");
   const hashtags = await generateHashtags(apod);
