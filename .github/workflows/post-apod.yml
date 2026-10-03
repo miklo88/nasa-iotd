@@ -39,6 +39,10 @@ on:
         description: "Build caption and log it, but skip the actual IG publish (default: true for safety)"
         type: boolean
         default: true
+      force:
+        description: "Repost even if today's APOD already posted OK. Delete the bad post on Instagram FIRST — this does not replace it, it adds another."
+        type: boolean
+        default: false
 
 # Prevent a recovery cron from racing the primary cron's git push. With
 # cancel-in-progress: false the second fire just waits.
@@ -106,6 +110,9 @@ jobs:
           # string in env → script treats as not-true → real post. Manual triggers
           # respect the checkbox, which defaults to true (dry run).
           DRY_RUN: ${{ inputs.dry_run }}
+          # Only ever set by a deliberate manual run; schedule triggers pass
+          # an empty string, which the script treats as not-true.
+          FORCE: ${{ inputs.force }}
           TRIGGER: ${{ github.event_name }}
         with:
           # 8 min per attempt: images finish in ~15 s, videos need up to

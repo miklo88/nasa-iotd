@@ -104,6 +104,11 @@ const {
 
 const DRY_RUN = process.env.DRY_RUN === "true";
 const TRIGGER = process.env.TRIGGER || "local";
+// Escape hatch for reposting a day that already logged a successful run —
+// e.g. when a post went out with the wrong image and has been deleted from
+// Instagram by hand. Bypasses both idempotency guards, so a run with this
+// set WILL publish a second post if the first one is still up.
+const FORCE = process.env.FORCE === "true";
 
 function requireEnv(name, value) {
   if (!value) {
@@ -1029,7 +1034,12 @@ async function run(record) {
   // recovery crons can fire freely without ever double-posting.
   // Dry runs deliberately skip this check — re-running dry-run should
   // always exercise the script fully even if a real post already happened.
-  if (!DRY_RUN) {
+  if (FORCE) {
+    console.log("⚠️  FORCE=true — idempotency guards bypassed for this run.");
+    record.forced = true;
+  }
+
+  if (!DRY_RUN && !FORCE) {
     const existing = await findTodaysSuccessfulPost();
     if (existing) {
       console.log(
@@ -1060,7 +1070,7 @@ async function run(record) {
   // photo. This is what actually kills the double-posts: an early-hours fire
   // and a later scheduled fire can both wake up on the same APOD, but only
   // the first one gets to publish it.
-  if (!DRY_RUN) {
+  if (!DRY_RUN && !FORCE) {
     const dup = await findSuccessfulPostForApodDate(apod.date);
     if (dup) {
       console.log(
