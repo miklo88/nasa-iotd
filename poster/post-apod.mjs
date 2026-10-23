@@ -16,7 +16,10 @@
 //                        path needs GitHub Actions. See planSlices().
 //       - direct video → posts as a Reel with share_to_feed=true; needs a
 //                        polling step because IG processes video async
-//       - embed video  → skipped (IG cannot fetch YouTube/Vimeo URLs)
+//       - embed video  → IG cannot fetch a YouTube/Vimeo URL, and the video
+//                        is not ours to re-publish, so the post carries the
+//                        day's still and the caption sends viewers to the
+//                        original. See primaryEmbedFromItem().
 //   3. Builds a caption from the title + explanation + hashtags.
 //   4. Creates an Instagram media container, then publishes it.
 //   5. Appends a structured JSON line to logs/YYYY-MM.jsonl (always — even
@@ -284,6 +287,26 @@ function primaryVideoFromItem(item) {
   return url && isDirectVideoFile(url) ? url : null;
 }
 
+// Video APODs whose media is a YouTube/Vimeo embed rather than a file.
+// Instagram cannot fetch an embed, and the video is not ours to re-publish,
+// so these days post the still and send people to the original instead.
+//
+// Same restraint as primaryVideoFromItem: only the embed sitting in the
+// media slot, never the video links APOD write-ups scatter through their
+// explanations. Scans past non-video iframes (analytics, etc.) rather than
+// trusting the first one on the page.
+function primaryEmbedFromItem(item) {
+  const body = decodeEntities(item);
+  for (const m of body.matchAll(/<iframe\b[^>]*\bsrc=["']([^"']+)["']/gi)) {
+    const src = m[1].trim();
+    const yt = src.match(/youtube(?:-nocookie)?\.com\/embed\/([\w-]+)/i);
+    if (yt) return `youtu.be/${yt[1]}`;
+    const vimeo = src.match(/player\.vimeo\.com\/video\/(\d+)/i);
+    if (vimeo) return `vimeo.com/${vimeo[1]}`;
+  }
+  return null;
+}
+
 async function fetchApodFromFeed() {
   const res = await fetch(APOD_FEED_URL, {
     headers: { accept: "application/rss+xml, application/xml, text/xml" },
@@ -311,6 +334,9 @@ async function fetchApodFromFeed() {
     url: videoUrl || hdurl,
     hdurl,
     media_type: videoUrl || isDirectVideoFile(hdurl) ? "video" : "image",
+    // Only when we are falling back to the still — a day we can post as a
+    // Reel needs no pointer away from the post.
+    embed_url: videoUrl ? null : primaryEmbedFromItem(item),
     copyright: cleanCredit(tagText(item, "apod:copyright")),
     permalink: tidy(stripHtml(tagText(item, "link"))),
     source: "feed",
@@ -657,7 +683,10 @@ async function generateHashtags({ title, explanation }) {
   return deduped;
 }
 
-function buildCaption({ title, explanation, date, copyright }, hashtagTokens) {
+function buildCaption(
+  { title, explanation, date, copyright, embed_url },
+  hashtagTokens
+) {
   const hashtags = (hashtagTokens?.length ? hashtagTokens : HASHTAG_FALLBACK)
     .map((t) => `#${t}`)
     .join(" ");
@@ -666,12 +695,21 @@ function buildCaption({ title, explanation, date, copyright }, hashtagTokens) {
     ? `📷 Image credit: ${copyright.trim()} / NASA APOD`
     : `📷 Image credit: NASA APOD`;
 
+  // On embed days the post is a still pulled from someone else's video, so
+  // the caption says so and sends viewers to the original. Instagram feed
+  // captions are not clickable, which is why this is a short typeable URL
+  // rather than a full link.
+  const watchLine = embed_url
+    ? `\n\n🎬 This one is a video — watch the real thing at ${embed_url}`
+    : "";
+
+  const budget = EXPLANATION_BUDGET - watchLine.length;
   const trimmedExplanation =
-    explanation.length > EXPLANATION_BUDGET
-      ? explanation.slice(0, EXPLANATION_BUDGET - 1).trimEnd() + "…"
+    explanation.length > budget
+      ? explanation.slice(0, budget - 1).trimEnd() + "…"
       : explanation;
 
-  const caption = `🌌 ${title}\n${date}\n\n${trimmedExplanation}\n\n${credit}\n\n${hashtags}`;
+  const caption = `🌌 ${title}\n${date}\n\n${trimmedExplanation}${watchLine}\n\n${credit}\n\n${hashtags}`;
 
   // Final safety check — should never trip given the budget above, but defensive.
   if (caption.length > IG_CAPTION_MAX) {
@@ -1223,6 +1261,13 @@ async function run(record) {
   const hashtags = await generateHashtags(apod);
   console.log(`  Hashtags: ${hashtags.map((t) => `#${t}`).join(" ")}`);
   record.hashtags = hashtags;
+
+  if (apod.embed_url) {
+    console.log(
+      `  🎬 Subject is an embedded video — posting the still and pointing at ${apod.embed_url}`
+    );
+    record.embed_video_url = apod.embed_url;
+  }
 
   const caption = buildCaption(apod, hashtags);
   console.log(`→ Caption built (${caption.length} chars)`);
