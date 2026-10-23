@@ -266,6 +266,24 @@ function dimsFromUrl(url) {
   return null;
 }
 
+// On video days the feed carries the clip as an HTML5 <video><source src="…">
+// element in the item body, pointing at NASA's own asset CDN. That element is
+// the only trustworthy signal we have left: the migrated feed dropped
+// apod:media_type entirely, and its hdurl is a still frame even when the
+// subject is a video, which is how a sonification went out as a silent JPEG.
+//
+// Only the <video> element counts, never loose .mp4 links in the explanation.
+// APOD write-ups cite video constantly — the Treble Clef entry links two
+// Chandra clips beneath what is genuinely a still image — so matching those
+// would publish the wrong media on ordinary photo days.
+function primaryVideoFromItem(item) {
+  const el = decodeEntities(item).match(/<video\b[^>]*>([\s\S]*?)<\/video>/i);
+  if (!el) return null;
+  const src = el[1].match(/<source\b[^>]*\bsrc=["']([^"']+)["']/i);
+  const url = src?.[1]?.trim();
+  return url && isDirectVideoFile(url) ? url : null;
+}
+
 async function fetchApodFromFeed() {
   const res = await fetch(APOD_FEED_URL, {
     headers: { accept: "application/rss+xml, application/xml, text/xml" },
@@ -283,15 +301,16 @@ async function fetchApodFromFeed() {
     ? new Date(pubDate).toISOString().slice(0, 10)
     : new Date().toISOString().slice(0, 10);
 
+  const videoUrl = primaryVideoFromItem(item);
+
   return {
     date,
     title: tidy(stripHtml(tagText(item, "title"))),
     explanation: cleanExplanation(tagText(item, "apod:explanation")),
-    url: hdurl,
+    // The still stays available as hdurl so a video day can fall back to it.
+    url: videoUrl || hdurl,
     hdurl,
-    // On video days the feed points at a file rather than a still, so keep
-    // the Reels path reachable instead of mislabelling it an image.
-    media_type: isDirectVideoFile(hdurl) ? "video" : "image",
+    media_type: videoUrl || isDirectVideoFile(hdurl) ? "video" : "image",
     copyright: cleanCredit(tagText(item, "apod:copyright")),
     permalink: tidy(stripHtml(tagText(item, "link"))),
     source: "feed",
