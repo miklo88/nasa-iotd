@@ -16,7 +16,10 @@
 //                        path needs GitHub Actions. See planSlices().
 //       - direct video → posts as a Reel with share_to_feed=true; needs a
 //                        polling step because IG processes video async
-//       - embed video  → skipped (IG cannot fetch YouTube/Vimeo URLs)
+//       - embed video  → IG cannot fetch a YouTube/Vimeo URL, and the video
+//                        is not ours to re-publish, so the post carries the
+//                        day's still and the caption sends viewers to the
+//                        original. See primaryEmbedFromItem().
 //   3. Builds a caption from the title + explanation + hashtags.
 //   4. Creates an Instagram media container, then publishes it.
 //   5. Appends a structured JSON line to logs/YYYY-MM.jsonl (always — even
@@ -266,6 +269,44 @@ function dimsFromUrl(url) {
   return null;
 }
 
+// On video days the feed carries the clip as an HTML5 <video><source src="…">
+// element in the item body, pointing at NASA's own asset CDN. That element is
+// the only trustworthy signal we have left: the migrated feed dropped
+// apod:media_type entirely, and its hdurl is a still frame even when the
+// subject is a video, which is how a sonification went out as a silent JPEG.
+//
+// Only the <video> element counts, never loose .mp4 links in the explanation.
+// APOD write-ups cite video constantly — the Treble Clef entry links two
+// Chandra clips beneath what is genuinely a still image — so matching those
+// would publish the wrong media on ordinary photo days.
+function primaryVideoFromItem(item) {
+  const el = decodeEntities(item).match(/<video\b[^>]*>([\s\S]*?)<\/video>/i);
+  if (!el) return null;
+  const src = el[1].match(/<source\b[^>]*\bsrc=["']([^"']+)["']/i);
+  const url = src?.[1]?.trim();
+  return url && isDirectVideoFile(url) ? url : null;
+}
+
+// Video APODs whose media is a YouTube/Vimeo embed rather than a file.
+// Instagram cannot fetch an embed, and the video is not ours to re-publish,
+// so these days post the still and send people to the original instead.
+//
+// Same restraint as primaryVideoFromItem: only the embed sitting in the
+// media slot, never the video links APOD write-ups scatter through their
+// explanations. Scans past non-video iframes (analytics, etc.) rather than
+// trusting the first one on the page.
+function primaryEmbedFromItem(item) {
+  const body = decodeEntities(item);
+  for (const m of body.matchAll(/<iframe\b[^>]*\bsrc=["']([^"']+)["']/gi)) {
+    const src = m[1].trim();
+    const yt = src.match(/youtube(?:-nocookie)?\.com\/embed\/([\w-]+)/i);
+    if (yt) return `youtu.be/${yt[1]}`;
+    const vimeo = src.match(/player\.vimeo\.com\/video\/(\d+)/i);
+    if (vimeo) return `vimeo.com/${vimeo[1]}`;
+  }
+  return null;
+}
+
 async function fetchApodFromFeed() {
   const res = await fetch(APOD_FEED_URL, {
     headers: { accept: "application/rss+xml, application/xml, text/xml" },
@@ -283,15 +324,19 @@ async function fetchApodFromFeed() {
     ? new Date(pubDate).toISOString().slice(0, 10)
     : new Date().toISOString().slice(0, 10);
 
+  const videoUrl = primaryVideoFromItem(item);
+
   return {
     date,
     title: tidy(stripHtml(tagText(item, "title"))),
     explanation: cleanExplanation(tagText(item, "apod:explanation")),
-    url: hdurl,
+    // The still stays available as hdurl so a video day can fall back to it.
+    url: videoUrl || hdurl,
     hdurl,
-    // On video days the feed points at a file rather than a still, so keep
-    // the Reels path reachable instead of mislabelling it an image.
-    media_type: isDirectVideoFile(hdurl) ? "video" : "image",
+    media_type: videoUrl || isDirectVideoFile(hdurl) ? "video" : "image",
+    // Only when we are falling back to the still — a day we can post as a
+    // Reel needs no pointer away from the post.
+    embed_url: videoUrl ? null : primaryEmbedFromItem(item),
     copyright: cleanCredit(tagText(item, "apod:copyright")),
     permalink: tidy(stripHtml(tagText(item, "link"))),
     source: "feed",
@@ -638,7 +683,10 @@ async function generateHashtags({ title, explanation }) {
   return deduped;
 }
 
-function buildCaption({ title, explanation, date, copyright }, hashtagTokens) {
+function buildCaption(
+  { title, explanation, date, copyright, embed_url },
+  hashtagTokens
+) {
   const hashtags = (hashtagTokens?.length ? hashtagTokens : HASHTAG_FALLBACK)
     .map((t) => `#${t}`)
     .join(" ");
@@ -647,12 +695,21 @@ function buildCaption({ title, explanation, date, copyright }, hashtagTokens) {
     ? `📷 Image credit: ${copyright.trim()} / NASA APOD`
     : `📷 Image credit: NASA APOD`;
 
+  // On embed days the post is a still pulled from someone else's video, so
+  // the caption says so and sends viewers to the original. Instagram feed
+  // captions are not clickable, which is why this is a short typeable URL
+  // rather than a full link.
+  const watchLine = embed_url
+    ? `\n\n🎬 This one is a video — watch the real thing at ${embed_url}`
+    : "";
+
+  const budget = EXPLANATION_BUDGET - watchLine.length;
   const trimmedExplanation =
-    explanation.length > EXPLANATION_BUDGET
-      ? explanation.slice(0, EXPLANATION_BUDGET - 1).trimEnd() + "…"
+    explanation.length > budget
+      ? explanation.slice(0, budget - 1).trimEnd() + "…"
       : explanation;
 
-  const caption = `🌌 ${title}\n${date}\n\n${trimmedExplanation}\n\n${credit}\n\n${hashtags}`;
+  const caption = `🌌 ${title}\n${date}\n\n${trimmedExplanation}${watchLine}\n\n${credit}\n\n${hashtags}`;
 
   // Final safety check — should never trip given the budget above, but defensive.
   if (caption.length > IG_CAPTION_MAX) {
@@ -1204,6 +1261,13 @@ async function run(record) {
   const hashtags = await generateHashtags(apod);
   console.log(`  Hashtags: ${hashtags.map((t) => `#${t}`).join(" ")}`);
   record.hashtags = hashtags;
+
+  if (apod.embed_url) {
+    console.log(
+      `  🎬 Subject is an embedded video — posting the still and pointing at ${apod.embed_url}`
+    );
+    record.embed_video_url = apod.embed_url;
+  }
 
   const caption = buildCaption(apod, hashtags);
   console.log(`→ Caption built (${caption.length} chars)`);
