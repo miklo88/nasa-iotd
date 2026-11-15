@@ -129,6 +129,19 @@ jobs:
       - name: Commit log entry
         if: always()
         run: |
+          # Both pathspecs below must exist on disk or `git add` aborts the
+          # whole step with exit 128 ("fatal: pathspec ... did not match any
+          # files"), which is fatal under `bash -e`. That is not hypothetical:
+          # once pruneOldSlices() removed the last tracked slice, `slices/`
+          # stopped existing (git does not track empty directories) and every
+          # run from 2026-11-13 on published to Instagram and then died here
+          # before pushing its log line. Because the idempotency guards read
+          # that pushed log, each of the three daily fires then saw no "ok"
+          # entry for the day and posted the same photo again — three posts a
+          # day until this mkdir was added. Note that `git status` tolerates an
+          # unmatched pathspec where `git add` does not, so the guard below
+          # does not catch this on its own.
+          mkdir -p logs slices
           # Also picks up slice directories the script pruned. On carousel
           # days the script already committed the new slices itself; this
           # catches the expiries on every other day, which is what keeps the
